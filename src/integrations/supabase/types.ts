@@ -14,7 +14,99 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      elevenlabs_keys: {
+        Row: {
+          api_key: string
+          created_at: string
+          id: string
+          is_active: boolean
+          last_used_at: string | null
+          name: string
+          usage_count: number
+        }
+        Insert: {
+          api_key: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          last_used_at?: string | null
+          name: string
+          usage_count?: number
+        }
+        Update: {
+          api_key?: string
+          created_at?: string
+          id?: string
+          is_active?: boolean
+          last_used_at?: string | null
+          name?: string
+          usage_count?: number
+        }
+        Relationships: []
+      }
+      jobs: {
+        Row: {
+          callback_url: string | null
+          created_at: string
+          error_message: string | null
+          id: string
+          input_data: Json | null
+          output_url: string | null
+          progress: number
+          source_url: string | null
+          status: Database["public"]["Enums"]["job_status"]
+          type: Database["public"]["Enums"]["job_type"]
+          updated_at: string
+        }
+        Insert: {
+          callback_url?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          input_data?: Json | null
+          output_url?: string | null
+          progress?: number
+          source_url?: string | null
+          status?: Database["public"]["Enums"]["job_status"]
+          type: Database["public"]["Enums"]["job_type"]
+          updated_at?: string
+        }
+        Update: {
+          callback_url?: string | null
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          input_data?: Json | null
+          output_url?: string | null
+          progress?: number
+          source_url?: string | null
+          status?: Database["public"]["Enums"]["job_status"]
+          type?: Database["public"]["Enums"]["job_type"]
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      settings: {
+        Row: {
+          id: string
+          key: string
+          updated_at: string
+          value: string
+        }
+        Insert: {
+          id?: string
+          key: string
+          updated_at?: string
+          value: string
+        }
+        Update: {
+          id?: string
+          key?: string
+          updated_at?: string
+          value?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +115,8 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      job_status: "pending" | "processing" | "completed" | "failed"
+      job_type: "merge" | "ai_generate"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +243,9 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      job_status: ["pending", "processing", "completed", "failed"],
+      job_type: ["merge", "ai_generate"],
+    },
   },
 } as const
