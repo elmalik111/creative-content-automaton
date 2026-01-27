@@ -16,6 +16,49 @@ interface JobInputData {
   duration: number;
 }
 
+interface StepIds {
+  scriptStep?: string;
+  voiceStep?: string;
+  imageStep?: string;
+  mergeStep?: string;
+  publishStep?: string;
+}
+
+async function createJobStep(jobId: string, stepName: string, stepOrder: number): Promise<string | undefined> {
+  const { data } = await supabase
+    .from("job_steps")
+    .insert({
+      job_id: jobId,
+      step_name: stepName,
+      step_order: stepOrder,
+      status: "pending"
+    })
+    .select()
+    .single();
+  return data?.id;
+}
+
+async function updateJobStep(stepId: string | undefined, status: string, errorMessage?: string) {
+  if (!stepId) return;
+  
+  const updates: Record<string, unknown> = { status };
+  
+  if (status === "processing") {
+    updates.started_at = new Date().toISOString();
+  } else if (status === "completed" || status === "failed") {
+    updates.completed_at = new Date().toISOString();
+  }
+  
+  if (errorMessage) {
+    updates.error_message = errorMessage;
+  }
+
+  await supabase
+    .from("job_steps")
+    .update(updates)
+    .eq("id", stepId);
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -37,8 +80,17 @@ serve(async (req) => {
 
     const inputData = job.input_data as JobInputData;
 
+    // Create job steps
+    const steps: StepIds = {
+      scriptStep: await createJobStep(job_id, "script_generation", 1),
+      voiceStep: await createJobStep(job_id, "voice_generation", 2),
+      imageStep: await createJobStep(job_id, "image_generation", 3),
+      mergeStep: await createJobStep(job_id, "media_merge", 4),
+      publishStep: await createJobStep(job_id, "publishing", 5),
+    };
+
     // Start processing in background (non-blocking)
-    processAIGeneration(job_id, inputData, job.source_url).catch(console.error);
+    processAIGeneration(job_id, inputData, job.source_url, steps).catch(console.error);
 
     return new Response(
       JSON.stringify({ status: "processing", job_id }),
@@ -57,22 +109,26 @@ serve(async (req) => {
 async function processAIGeneration(
   jobId: string,
   inputData: JobInputData,
-  sourceUrl: string | null
+  sourceUrl: string | null,
+  steps: StepIds
 ) {
   try {
     // Update status to processing
     await updateJobProgress(jobId, 5, "processing");
 
     // Step 1: Generate voiceover script with Gemini
+    await updateJobStep(steps.scriptStep, "processing");
     console.log("Generating voiceover script...");
     const script = await generateVoiceoverScript(
       inputData.title,
       inputData.description,
       inputData.duration
     );
+    await updateJobStep(steps.scriptStep, "completed");
     await updateJobProgress(jobId, 15);
 
     // Step 2: Generate audio with ElevenLabs
+    await updateJobStep(steps.voiceStep, "processing");
     console.log("Generating audio...");
     const voiceId = inputData.voice_type === "female_arabic" 
       ? "EXAVITQu4vr4xnSDxMaL"  // Sarah
@@ -82,7 +138,6 @@ async function processAIGeneration(
     if (!audioBuffer) {
       throw new Error("Failed to generate audio");
     }
-    await updateJobProgress(jobId, 35);
 
     // Upload audio to storage
     const audioFileName = `${jobId}/audio.mp3`;
@@ -100,14 +155,16 @@ async function processAIGeneration(
       .from("temp-files")
       .getPublicUrl(audioFileName);
 
-    await updateJobProgress(jobId, 40);
+    await updateJobStep(steps.voiceStep, "completed");
+    await updateJobProgress(jobId, 35);
 
-    // Step 3: Generate image prompts with Gemini
+    // Step 3: Generate image prompts with Gemini and images with Flux
+    await updateJobStep(steps.imageStep, "processing");
     console.log("Generating image prompts...");
     const imagePrompts = await generateImagePrompts(script, inputData.scene_count);
-    await updateJobProgress(jobId, 45);
+    await updateJobProgress(jobId, 40);
 
-    // Step 4: Generate images with Flux
+    // Generate images with Flux
     console.log("Generating images...");
     const imageUrls: string[] = [];
     const progressPerImage = 30 / inputData.scene_count;
@@ -135,16 +192,18 @@ async function processAIGeneration(
         .getPublicUrl(imageFileName);
 
       imageUrls.push(imageUrlData.publicUrl);
-      await updateJobProgress(jobId, 45 + (i + 1) * progressPerImage);
+      await updateJobProgress(jobId, 40 + (i + 1) * progressPerImage);
     }
 
     if (imageUrls.length === 0) {
       throw new Error("Failed to generate any images");
     }
 
-    await updateJobProgress(jobId, 80);
+    await updateJobStep(steps.imageStep, "completed");
+    await updateJobProgress(jobId, 75);
 
-    // Step 5: Merge images with audio
+    // Step 4: Merge images with audio
+    await updateJobStep(steps.mergeStep, "processing");
     console.log("Merging media...");
     const mergeResult = await mergeMediaWithFFmpeg({
       images: imageUrls,
@@ -156,9 +215,12 @@ async function processAIGeneration(
       throw new Error(mergeResult.error || "Video merge failed");
     }
 
+    await updateJobStep(steps.mergeStep, "completed");
     await updateJobProgress(jobId, 90);
 
-    // Step 6: Upload final video to output storage
+    // Step 5: Upload final video and publish
+    await updateJobStep(steps.publishStep, "processing");
+    
     if (mergeResult.output_url) {
       const videoResponse = await fetch(mergeResult.output_url);
       const videoBuffer = await videoResponse.arrayBuffer();
@@ -188,6 +250,8 @@ async function processAIGeneration(
         })
         .eq("id", jobId);
 
+      await updateJobStep(steps.publishStep, "completed");
+
       // Send Telegram notification if source is Telegram
       if (sourceUrl?.startsWith("telegram:")) {
         const chatId = parseInt(sourceUrl.replace("telegram:", ""));
@@ -197,6 +261,21 @@ async function processAIGeneration(
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     console.error("AI Generation error:", error);
+    
+    // Mark failed step
+    for (const stepId of Object.values(steps)) {
+      if (stepId) {
+        const { data } = await supabase
+          .from("job_steps")
+          .select("status")
+          .eq("id", stepId)
+          .single();
+        
+        if (data?.status === "processing") {
+          await updateJobStep(stepId, "failed", error.message);
+        }
+      }
+    }
     
     await supabase
       .from("jobs")
