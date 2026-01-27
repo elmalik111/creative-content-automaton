@@ -1,0 +1,275 @@
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { supabase, corsHeaders } from "../_shared/supabase.ts";
+import { generateVoiceoverScript, generateImagePrompts } from "../_shared/gemini.ts";
+import { generateSpeech } from "../_shared/elevenlabs.ts";
+import { generateImageWithFlux, mergeMediaWithFFmpeg } from "../_shared/huggingface.ts";
+
+interface AIGenerateRequest {
+  job_id: string;
+}
+
+interface JobInputData {
+  title: string;
+  description: string;
+  voice_type: string;
+  scene_count: number;
+  duration: number;
+}
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  try {
+    const { job_id }: AIGenerateRequest = await req.json();
+
+    // Get job details
+    const { data: job, error: jobError } = await supabase
+      .from("jobs")
+      .select("*")
+      .eq("id", job_id)
+      .single();
+
+    if (jobError || !job) {
+      throw new Error("Job not found");
+    }
+
+    const inputData = job.input_data as JobInputData;
+
+    // Start processing in background (non-blocking)
+    processAIGeneration(job_id, inputData, job.source_url).catch(console.error);
+
+    return new Response(
+      JSON.stringify({ status: "processing", job_id }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error("AI Generate error:", error);
+    return new Response(
+      JSON.stringify({ error: error.message }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+});
+
+async function processAIGeneration(
+  jobId: string,
+  inputData: JobInputData,
+  sourceUrl: string | null
+) {
+  try {
+    // Update status to processing
+    await updateJobProgress(jobId, 5, "processing");
+
+    // Step 1: Generate voiceover script with Gemini
+    console.log("Generating voiceover script...");
+    const script = await generateVoiceoverScript(
+      inputData.title,
+      inputData.description,
+      inputData.duration
+    );
+    await updateJobProgress(jobId, 15);
+
+    // Step 2: Generate audio with ElevenLabs
+    console.log("Generating audio...");
+    const voiceId = inputData.voice_type === "female_arabic" 
+      ? "EXAVITQu4vr4xnSDxMaL"  // Sarah
+      : "onwK4e9ZLuTAKqWW03F9"; // Daniel
+
+    const audioBuffer = await generateSpeech(script, voiceId);
+    if (!audioBuffer) {
+      throw new Error("Failed to generate audio");
+    }
+    await updateJobProgress(jobId, 35);
+
+    // Upload audio to storage
+    const audioFileName = `${jobId}/audio.mp3`;
+    const { error: audioUploadError } = await supabase.storage
+      .from("temp-files")
+      .upload(audioFileName, audioBuffer, {
+        contentType: "audio/mpeg",
+      });
+
+    if (audioUploadError) {
+      throw new Error(`Audio upload failed: ${audioUploadError.message}`);
+    }
+
+    const { data: audioUrlData } = supabase.storage
+      .from("temp-files")
+      .getPublicUrl(audioFileName);
+
+    await updateJobProgress(jobId, 40);
+
+    // Step 3: Generate image prompts with Gemini
+    console.log("Generating image prompts...");
+    const imagePrompts = await generateImagePrompts(script, inputData.scene_count);
+    await updateJobProgress(jobId, 45);
+
+    // Step 4: Generate images with Flux
+    console.log("Generating images...");
+    const imageUrls: string[] = [];
+    const progressPerImage = 30 / inputData.scene_count;
+
+    for (let i = 0; i < imagePrompts.length; i++) {
+      const prompt = imagePrompts[i];
+      console.log(`Generating image ${i + 1}/${imagePrompts.length}: ${prompt.slice(0, 50)}...`);
+      
+      const imageBuffer = await generateImageWithFlux(prompt);
+      
+      const imageFileName = `${jobId}/image_${i}.png`;
+      const { error: imageUploadError } = await supabase.storage
+        .from("temp-files")
+        .upload(imageFileName, imageBuffer, {
+          contentType: "image/png",
+        });
+
+      if (imageUploadError) {
+        console.error(`Image ${i} upload failed:`, imageUploadError);
+        continue;
+      }
+
+      const { data: imageUrlData } = supabase.storage
+        .from("temp-files")
+        .getPublicUrl(imageFileName);
+
+      imageUrls.push(imageUrlData.publicUrl);
+      await updateJobProgress(jobId, 45 + (i + 1) * progressPerImage);
+    }
+
+    if (imageUrls.length === 0) {
+      throw new Error("Failed to generate any images");
+    }
+
+    await updateJobProgress(jobId, 80);
+
+    // Step 5: Merge images with audio
+    console.log("Merging media...");
+    const mergeResult = await mergeMediaWithFFmpeg({
+      images: imageUrls,
+      audio: audioUrlData.publicUrl,
+      output_format: "mp4",
+    });
+
+    if (mergeResult.status === "failed") {
+      throw new Error(mergeResult.error || "Video merge failed");
+    }
+
+    await updateJobProgress(jobId, 90);
+
+    // Step 6: Upload final video to output storage
+    if (mergeResult.output_url) {
+      const videoResponse = await fetch(mergeResult.output_url);
+      const videoBuffer = await videoResponse.arrayBuffer();
+
+      const finalVideoName = `${jobId}/final_video.mp4`;
+      const { error: videoUploadError } = await supabase.storage
+        .from("media-output")
+        .upload(finalVideoName, videoBuffer, {
+          contentType: "video/mp4",
+        });
+
+      if (videoUploadError) {
+        console.error("Final video upload failed:", videoUploadError);
+      }
+
+      const { data: finalVideoUrl } = supabase.storage
+        .from("media-output")
+        .getPublicUrl(finalVideoName);
+
+      // Mark job as complete
+      await supabase
+        .from("jobs")
+        .update({
+          status: "completed",
+          progress: 100,
+          output_url: finalVideoUrl.publicUrl,
+        })
+        .eq("id", jobId);
+
+      // Send Telegram notification if source is Telegram
+      if (sourceUrl?.startsWith("telegram:")) {
+        const chatId = parseInt(sourceUrl.replace("telegram:", ""));
+        await sendTelegramNotification(chatId, jobId, finalVideoUrl.publicUrl);
+      }
+    }
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error("AI Generation error:", error);
+    
+    await supabase
+      .from("jobs")
+      .update({
+        status: "failed",
+        error_message: error.message,
+      })
+      .eq("id", jobId);
+
+    // Notify Telegram of failure
+    if (sourceUrl?.startsWith("telegram:")) {
+      const chatId = parseInt(sourceUrl.replace("telegram:", ""));
+      await sendTelegramFailureNotification(chatId, jobId, error.message);
+    }
+  }
+}
+
+async function updateJobProgress(jobId: string, progress: number, status?: string) {
+  const update: Record<string, unknown> = { progress };
+  if (status) update.status = status;
+
+  await supabase
+    .from("jobs")
+    .update(update)
+    .eq("id", jobId);
+}
+
+async function sendTelegramNotification(chatId: number, jobId: string, videoUrl: string) {
+  const { data: tokenSetting } = await supabase
+    .from("settings")
+    .select("value")
+    .eq("key", "telegram_token")
+    .maybeSingle();
+
+  if (!tokenSetting?.value) return;
+
+  await fetch(`https://api.telegram.org/bot${tokenSetting.value}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `✅ تم الانتهاء من فيديوك!
+
+🎬 رقم المهمة: ${jobId.slice(0, 8)}
+🔗 رابط الفيديو: ${videoUrl}
+
+جاري النشر على المنصات...`,
+      parse_mode: "HTML",
+    }),
+  });
+}
+
+async function sendTelegramFailureNotification(chatId: number, jobId: string, error: string) {
+  const { data: tokenSetting } = await supabase
+    .from("settings")
+    .select("value")
+    .eq("key", "telegram_token")
+    .maybeSingle();
+
+  if (!tokenSetting?.value) return;
+
+  await fetch(`https://api.telegram.org/bot${tokenSetting.value}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: `❌ فشل في إنشاء الفيديو
+
+🔴 رقم المهمة: ${jobId.slice(0, 8)}
+⚠️ الخطأ: ${error}
+
+حاول مرة أخرى لاحقاً.`,
+      parse_mode: "HTML",
+    }),
+  });
+}
