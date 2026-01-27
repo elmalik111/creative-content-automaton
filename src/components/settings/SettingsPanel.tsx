@@ -1,6 +1,8 @@
 import { Card, CardHeader, CardTitle } from '@/components/ui/card';
 import { TelegramSettings } from './TelegramSettings';
 import { ElevenLabsKeys } from './ElevenLabsKeys';
+import { OAuthSettings } from './OAuthSettings';
+import { ApiKeysSettings } from './ApiKeysSettings';
 import { Settings } from 'lucide-react';
 
 export function SettingsPanel() {
@@ -17,6 +19,8 @@ export function SettingsPanel() {
       
       <TelegramSettings />
       <ElevenLabsKeys />
+      <OAuthSettings />
+      <ApiKeysSettings />
     </div>
   );
 }
