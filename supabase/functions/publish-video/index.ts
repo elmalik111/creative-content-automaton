@@ -56,39 +56,108 @@ serve(async (req) => {
   }
 });
 
-async function publishToYouTube(
-  request: PublishRequest
-): Promise<{ success: boolean; url?: string; error?: string }> {
-  // Get stored OAuth refresh token from settings
-  const { data: tokenSetting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "youtube_refresh_token")
+async function getValidAccessToken(platform: string): Promise<{ access_token: string; page_access_token?: string; page_id?: string; ig_user_id?: string } | null> {
+  const { data: tokenData } = await supabase
+    .from("oauth_tokens")
+    .select("*")
+    .eq("platform", platform)
+    .eq("is_active", true)
     .maybeSingle();
 
-  if (!tokenSetting?.value) {
-    return { success: false, error: "YouTube not authenticated. Please connect your YouTube account." };
-  }
+  if (!tokenData) return null;
 
-  try {
-    // Exchange refresh token for access token
-    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+  let accessToken = tokenData.access_token;
+
+  // Check if token is expired and needs refresh (only for YouTube)
+  if (platform === "youtube" && tokenData.expires_at && new Date(tokenData.expires_at) < new Date()) {
+    if (!tokenData.refresh_token || !YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) {
+      return null;
+    }
+
+    // Refresh the token
+    const refreshResponse = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
-        client_id: YOUTUBE_CLIENT_ID!,
-        client_secret: YOUTUBE_CLIENT_SECRET!,
-        refresh_token: tokenSetting.value,
+        client_id: YOUTUBE_CLIENT_ID,
+        client_secret: YOUTUBE_CLIENT_SECRET,
+        refresh_token: tokenData.refresh_token,
         grant_type: "refresh_token",
       }),
     });
 
-    const tokenData = await tokenResponse.json();
+    const refreshData = await refreshResponse.json();
 
-    if (!tokenData.access_token) {
-      return { success: false, error: "Failed to refresh YouTube token" };
+    if (refreshData.error) {
+      console.error("Token refresh failed:", refreshData.error);
+      return null;
     }
 
+    // Update token in database
+    const expiresAt = refreshData.expires_in 
+      ? new Date(Date.now() + refreshData.expires_in * 1000).toISOString()
+      : null;
+
+    await supabase
+      .from("oauth_tokens")
+      .update({ 
+        access_token: refreshData.access_token,
+        expires_at: expiresAt,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", tokenData.id);
+
+    accessToken = refreshData.access_token;
+  }
+
+  // For Facebook, get page access token
+  if (platform === "facebook") {
+    const pagesResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token&access_token=${accessToken}`
+    );
+    const pagesData = await pagesResponse.json();
+    const page = pagesData.data?.[0];
+    
+    if (page) {
+      return { 
+        access_token: accessToken, 
+        page_access_token: page.access_token,
+        page_id: page.id 
+      };
+    }
+  }
+
+  // For Instagram, get IG user ID
+  if (platform === "instagram") {
+    const pagesResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me/accounts?fields=id,instagram_business_account&access_token=${accessToken}`
+    );
+    const pagesData = await pagesResponse.json();
+    const pageWithIG = pagesData.data?.find(
+      (page: { instagram_business_account?: { id: string } }) => page.instagram_business_account
+    );
+    
+    if (pageWithIG) {
+      return { 
+        access_token: accessToken,
+        ig_user_id: pageWithIG.instagram_business_account.id 
+      };
+    }
+  }
+
+  return { access_token: accessToken };
+}
+
+async function publishToYouTube(
+  request: PublishRequest
+): Promise<{ success: boolean; url?: string; error?: string }> {
+  const tokenInfo = await getValidAccessToken("youtube");
+
+  if (!tokenInfo) {
+    return { success: false, error: "YouTube not authenticated or token expired" };
+  }
+
+  try {
     // Download video
     const videoResponse = await fetch(request.video_url);
     const videoBuffer = await videoResponse.arrayBuffer();
@@ -99,7 +168,7 @@ async function publishToYouTube(
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${tokenData.access_token}`,
+          Authorization: `Bearer ${tokenInfo.access_token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -118,7 +187,8 @@ async function publishToYouTube(
     const uploadUrl = uploadResponse.headers.get("Location");
 
     if (!uploadUrl) {
-      return { success: false, error: "Failed to initiate YouTube upload" };
+      const errorData = await uploadResponse.json();
+      return { success: false, error: errorData.error?.message || "Failed to initiate YouTube upload" };
     }
 
     // Upload the actual video
@@ -139,7 +209,7 @@ async function publishToYouTube(
       };
     }
 
-    return { success: false, error: "Upload completed but no video ID received" };
+    return { success: false, error: videoData.error?.message || "Upload completed but no video ID received" };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     return { success: false, error: error.message };
@@ -149,26 +219,16 @@ async function publishToYouTube(
 async function publishToInstagram(
   request: PublishRequest
 ): Promise<{ success: boolean; url?: string; error?: string }> {
-  const { data: tokenSetting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "instagram_access_token")
-    .maybeSingle();
+  const tokenInfo = await getValidAccessToken("instagram");
 
-  const { data: igIdSetting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "instagram_user_id")
-    .maybeSingle();
-
-  if (!tokenSetting?.value || !igIdSetting?.value) {
-    return { success: false, error: "Instagram not authenticated" };
+  if (!tokenInfo?.ig_user_id) {
+    return { success: false, error: "Instagram not authenticated or no business account linked" };
   }
 
   try {
     // Create media container
     const containerResponse = await fetch(
-      `https://graph.facebook.com/v18.0/${igIdSetting.value}/media`,
+      `https://graph.facebook.com/v18.0/${tokenInfo.ig_user_id}/media`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -176,34 +236,59 @@ async function publishToInstagram(
           media_type: "REELS",
           video_url: request.video_url,
           caption: `${request.title}\n\n${request.description}`,
-          access_token: tokenSetting.value,
+          access_token: tokenInfo.access_token,
         }),
       }
     );
 
     const containerData = await containerResponse.json();
 
+    if (containerData.error) {
+      return { success: false, error: containerData.error.message };
+    }
+
     if (!containerData.id) {
       return { success: false, error: "Failed to create media container" };
     }
 
-    // Wait for processing
-    await new Promise((resolve) => setTimeout(resolve, 30000));
+    // Wait for processing (poll status)
+    let attempts = 0;
+    const maxAttempts = 30;
+    
+    while (attempts < maxAttempts) {
+      await new Promise((resolve) => setTimeout(resolve, 10000));
+      
+      const statusResponse = await fetch(
+        `https://graph.facebook.com/v18.0/${containerData.id}?fields=status_code&access_token=${tokenInfo.access_token}`
+      );
+      const statusData = await statusResponse.json();
+      
+      if (statusData.status_code === "FINISHED") break;
+      if (statusData.status_code === "ERROR") {
+        return { success: false, error: "Media processing failed" };
+      }
+      
+      attempts++;
+    }
 
     // Publish
     const publishResponse = await fetch(
-      `https://graph.facebook.com/v18.0/${igIdSetting.value}/media_publish`,
+      `https://graph.facebook.com/v18.0/${tokenInfo.ig_user_id}/media_publish`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           creation_id: containerData.id,
-          access_token: tokenSetting.value,
+          access_token: tokenInfo.access_token,
         }),
       }
     );
 
     const publishData = await publishResponse.json();
+
+    if (publishData.error) {
+      return { success: false, error: publishData.error.message };
+    }
 
     if (publishData.id) {
       return {
@@ -222,25 +307,15 @@ async function publishToInstagram(
 async function publishToFacebook(
   request: PublishRequest
 ): Promise<{ success: boolean; url?: string; error?: string }> {
-  const { data: tokenSetting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "facebook_access_token")
-    .maybeSingle();
+  const tokenInfo = await getValidAccessToken("facebook");
 
-  const { data: pageIdSetting } = await supabase
-    .from("settings")
-    .select("value")
-    .eq("key", "facebook_page_id")
-    .maybeSingle();
-
-  if (!tokenSetting?.value || !pageIdSetting?.value) {
-    return { success: false, error: "Facebook not authenticated" };
+  if (!tokenInfo?.page_id || !tokenInfo?.page_access_token) {
+    return { success: false, error: "Facebook not authenticated or no page linked" };
   }
 
   try {
     const response = await fetch(
-      `https://graph.facebook.com/v18.0/${pageIdSetting.value}/videos`,
+      `https://graph.facebook.com/v18.0/${tokenInfo.page_id}/videos`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -248,12 +323,16 @@ async function publishToFacebook(
           file_url: request.video_url,
           title: request.title,
           description: request.description,
-          access_token: tokenSetting.value,
+          access_token: tokenInfo.page_access_token,
         }),
       }
     );
 
     const data = await response.json();
+
+    if (data.error) {
+      return { success: false, error: data.error.message };
+    }
 
     if (data.id) {
       return {
@@ -262,7 +341,7 @@ async function publishToFacebook(
       };
     }
 
-    return { success: false, error: data.error?.message || "Upload failed" };
+    return { success: false, error: "Upload failed" };
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     return { success: false, error: error.message };

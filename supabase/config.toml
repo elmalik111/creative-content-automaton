@@ -1,1 +1,10 @@
 project_id = "cidxcujlfkrzvvmljxqs"
+
+[functions.google-auth]
+verify_jwt = false
+
+[functions.verify-tokens]
+verify_jwt = false
+
+[functions.test-publish]
+verify_jwt = false

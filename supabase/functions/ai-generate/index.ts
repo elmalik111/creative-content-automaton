@@ -38,7 +38,7 @@ async function createJobStep(jobId: string, stepName: string, stepOrder: number)
   return data?.id;
 }
 
-async function updateJobStep(stepId: string | undefined, status: string, errorMessage?: string) {
+async function updateJobStep(stepId: string | undefined, status: string, errorMessage?: string, outputData?: Record<string, unknown>) {
   if (!stepId) return;
   
   const updates: Record<string, unknown> = { status };
@@ -51,6 +51,10 @@ async function updateJobStep(stepId: string | undefined, status: string, errorMe
   
   if (errorMessage) {
     updates.error_message = errorMessage;
+  }
+
+  if (outputData) {
+    updates.output_data = outputData;
   }
 
   await supabase
@@ -124,7 +128,7 @@ async function processAIGeneration(
       inputData.description,
       inputData.duration
     );
-    await updateJobStep(steps.scriptStep, "completed");
+    await updateJobStep(steps.scriptStep, "completed", undefined, { script });
     await updateJobProgress(jobId, 15);
 
     // Step 2: Generate audio with ElevenLabs
@@ -155,7 +159,7 @@ async function processAIGeneration(
       .from("temp-files")
       .getPublicUrl(audioFileName);
 
-    await updateJobStep(steps.voiceStep, "completed");
+    await updateJobStep(steps.voiceStep, "completed", undefined, { audio_url: audioUrlData.publicUrl });
     await updateJobProgress(jobId, 35);
 
     // Step 3: Generate image prompts with Gemini and images with Flux
@@ -199,7 +203,7 @@ async function processAIGeneration(
       throw new Error("Failed to generate any images");
     }
 
-    await updateJobStep(steps.imageStep, "completed");
+    await updateJobStep(steps.imageStep, "completed", undefined, { image_urls: imageUrls });
     await updateJobProgress(jobId, 75);
 
     // Step 4: Merge images with audio
@@ -215,11 +219,13 @@ async function processAIGeneration(
       throw new Error(mergeResult.error || "Video merge failed");
     }
 
-    await updateJobStep(steps.mergeStep, "completed");
+    await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeResult.output_url });
     await updateJobProgress(jobId, 90);
 
     // Step 5: Upload final video and publish
     await updateJobStep(steps.publishStep, "processing");
+    
+    let finalVideoUrl: string | null = null;
     
     if (mergeResult.output_url) {
       const videoResponse = await fetch(mergeResult.output_url);
@@ -236,9 +242,11 @@ async function processAIGeneration(
         console.error("Final video upload failed:", videoUploadError);
       }
 
-      const { data: finalVideoUrl } = supabase.storage
+      const { data: finalVideoUrlData } = supabase.storage
         .from("media-output")
         .getPublicUrl(finalVideoName);
+
+      finalVideoUrl = finalVideoUrlData.publicUrl;
 
       // Mark job as complete
       await supabase
@@ -246,16 +254,27 @@ async function processAIGeneration(
         .update({
           status: "completed",
           progress: 100,
-          output_url: finalVideoUrl.publicUrl,
+          output_url: finalVideoUrl,
         })
         .eq("id", jobId);
 
-      await updateJobStep(steps.publishStep, "completed");
+      // Auto-publish to connected platforms
+      const publishResults = await autoPublishToConnectedPlatforms(
+        jobId,
+        finalVideoUrl,
+        inputData.title,
+        inputData.description
+      );
 
-      // Send Telegram notification if source is Telegram
+      await updateJobStep(steps.publishStep, "completed", undefined, { 
+        video_url: finalVideoUrl,
+        publish_results: publishResults 
+      });
+
+      // Send Telegram notification
       if (sourceUrl?.startsWith("telegram:")) {
         const chatId = parseInt(sourceUrl.replace("telegram:", ""));
-        await sendTelegramNotification(chatId, jobId, finalVideoUrl.publicUrl);
+        await sendTelegramNotification(chatId, jobId, finalVideoUrl, publishResults);
       }
     }
   } catch (err) {
@@ -293,6 +312,61 @@ async function processAIGeneration(
   }
 }
 
+async function autoPublishToConnectedPlatforms(
+  jobId: string,
+  videoUrl: string,
+  title: string,
+  description: string
+): Promise<Record<string, { success: boolean; url?: string; error?: string }>> {
+  const results: Record<string, { success: boolean; url?: string; error?: string }> = {};
+
+  // Get all active OAuth tokens
+  const { data: tokens } = await supabase
+    .from("oauth_tokens")
+    .select("platform")
+    .eq("is_active", true);
+
+  if (!tokens || tokens.length === 0) {
+    console.log("No connected platforms for auto-publish");
+    return results;
+  }
+
+  const connectedPlatforms = tokens.map(t => t.platform as "youtube" | "instagram" | "facebook");
+  
+  console.log("Auto-publishing to:", connectedPlatforms);
+
+  // Call publish-video function
+  try {
+    const response = await fetch(
+      `https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/publish-video`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+        },
+        body: JSON.stringify({
+          job_id: jobId,
+          video_url: videoUrl,
+          title,
+          description,
+          platforms: connectedPlatforms,
+        }),
+      }
+    );
+
+    const data = await response.json();
+    
+    if (data.results) {
+      Object.assign(results, data.results);
+    }
+  } catch (err) {
+    console.error("Auto-publish error:", err);
+  }
+
+  return results;
+}
+
 async function updateJobProgress(jobId: string, progress: number, status?: string) {
   const update: Record<string, unknown> = { progress };
   if (status) update.status = status;
@@ -303,7 +377,12 @@ async function updateJobProgress(jobId: string, progress: number, status?: strin
     .eq("id", jobId);
 }
 
-async function sendTelegramNotification(chatId: number, jobId: string, videoUrl: string) {
+async function sendTelegramNotification(
+  chatId: number, 
+  jobId: string, 
+  videoUrl: string,
+  publishResults: Record<string, { success: boolean; url?: string; error?: string }>
+) {
   const { data: tokenSetting } = await supabase
     .from("settings")
     .select("value")
@@ -311,6 +390,22 @@ async function sendTelegramNotification(chatId: number, jobId: string, videoUrl:
     .maybeSingle();
 
   if (!tokenSetting?.value) return;
+
+  // Build publish status message
+  let publishStatus = "";
+  const platforms = Object.keys(publishResults);
+  
+  if (platforms.length > 0) {
+    publishStatus = "\n\n📢 النشر:\n";
+    for (const platform of platforms) {
+      const result = publishResults[platform];
+      if (result.success) {
+        publishStatus += `✅ ${platform}: ${result.url || "تم النشر"}\n`;
+      } else {
+        publishStatus += `❌ ${platform}: ${result.error || "فشل"}\n`;
+      }
+    }
+  }
 
   await fetch(`https://api.telegram.org/bot${tokenSetting.value}/sendMessage`, {
     method: "POST",
@@ -320,9 +415,7 @@ async function sendTelegramNotification(chatId: number, jobId: string, videoUrl:
       text: `✅ تم الانتهاء من فيديوك!
 
 🎬 رقم المهمة: ${jobId.slice(0, 8)}
-🔗 رابط الفيديو: ${videoUrl}
-
-جاري النشر على المنصات...`,
+🔗 رابط الفيديو: ${videoUrl}${publishStatus}`,
       parse_mode: "HTML",
     }),
   });

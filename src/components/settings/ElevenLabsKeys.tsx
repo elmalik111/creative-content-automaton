@@ -10,7 +10,8 @@ import {
   useRemoveElevenLabsKey,
   useToggleElevenLabsKey 
 } from '@/hooks/useElevenLabsKeys';
-import { Key, Plus, Trash2, Loader2 } from 'lucide-react';
+import { supabase } from '@/integrations/supabase/client';
+import { Key, Plus, Trash2, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   Dialog,
@@ -21,6 +22,14 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 
+interface VerificationResult {
+  valid: boolean;
+  subscription?: string;
+  character_count?: number;
+  character_limit?: number;
+  error?: string;
+}
+
 export function ElevenLabsKeys() {
   const { data: keys, isLoading } = useElevenLabsKeys();
   const addKey = useAddElevenLabsKey();
@@ -30,6 +39,8 @@ export function ElevenLabsKeys() {
   const [isOpen, setIsOpen] = useState(false);
   const [newKeyName, setNewKeyName] = useState('');
   const [newApiKey, setNewApiKey] = useState('');
+  const [verifyingKey, setVerifyingKey] = useState<string | null>(null);
+  const [verificationResults, setVerificationResults] = useState<Record<string, VerificationResult>>({});
 
   const handleAddKey = async () => {
     if (!newKeyName.trim() || !newApiKey.trim()) {
@@ -51,6 +62,11 @@ export function ElevenLabsKeys() {
   const handleRemoveKey = async (id: string) => {
     try {
       await removeKey.mutateAsync(id);
+      setVerificationResults(prev => {
+        const newResults = { ...prev };
+        delete newResults[id];
+        return newResults;
+      });
       toast.success('API key removed');
     } catch {
       toast.error('Failed to remove API key');
@@ -63,6 +79,43 @@ export function ElevenLabsKeys() {
       toast.success(isActive ? 'Key activated' : 'Key deactivated');
     } catch {
       toast.error('Failed to update key status');
+    }
+  };
+
+  const handleVerifyKey = async (id: string, apiKey: string) => {
+    setVerifyingKey(id);
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-tokens', {
+        body: { platform: 'elevenlabs', token: apiKey },
+      });
+
+      if (error) throw error;
+
+      setVerificationResults(prev => ({
+        ...prev,
+        [id]: {
+          valid: data.valid,
+          subscription: data.account_info?.subscription,
+          character_count: data.account_info?.character_count,
+          character_limit: data.account_info?.character_limit,
+          error: data.error,
+        },
+      }));
+
+      if (data.valid) {
+        toast.success('API key verified successfully');
+      } else {
+        toast.error(data.error || 'Verification failed');
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setVerificationResults(prev => ({
+        ...prev,
+        [id]: { valid: false, error: error.message },
+      }));
+      toast.error(error.message);
+    } finally {
+      setVerifyingKey(null);
     }
   };
 
@@ -135,39 +188,86 @@ export function ElevenLabsKeys() {
           </div>
         ) : keys && keys.length > 0 ? (
           <div className="space-y-2">
-            {keys.map((key) => (
-              <div
-                key={key.id}
-                className="flex items-center justify-between p-3 rounded-lg bg-muted/50 border border-border"
-              >
-                <div className="flex items-center gap-3">
-                  <Switch
-                    checked={key.is_active}
-                    onCheckedChange={(checked) => handleToggleKey(key.id, checked)}
-                  />
-                  <div>
-                    <p className="font-medium text-foreground">{key.name}</p>
-                    <p className="text-xs text-muted-foreground font-mono">
-                      {maskApiKey(key.api_key)}
-                    </p>
+            {keys.map((key) => {
+              const verification = verificationResults[key.id];
+              
+              return (
+                <div
+                  key={key.id}
+                  className="p-3 rounded-lg bg-muted/50 border border-border space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Switch
+                        checked={key.is_active}
+                        onCheckedChange={(checked) => handleToggleKey(key.id, checked)}
+                      />
+                      <div>
+                        <p className="font-medium text-foreground">{key.name}</p>
+                        <p className="text-xs text-muted-foreground font-mono">
+                          {maskApiKey(key.api_key)}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="text-xs">
+                        Uses: {key.usage_count}
+                      </Badge>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleVerifyKey(key.id, key.api_key)}
+                        disabled={verifyingKey === key.id}
+                      >
+                        {verifyingKey === key.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          'Verify'
+                        )}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => handleRemoveKey(key.id)}
+                        disabled={removeKey.isPending}
+                        className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
+
+                  {/* Verification result */}
+                  {verification && (
+                    <div className={`p-2 rounded text-xs ${verification.valid ? 'bg-primary/5' : 'bg-destructive/5'}`}>
+                      {verification.valid ? (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="flex items-center gap-1">
+                            <CheckCircle2 className="h-3 w-3 text-primary" />
+                            Valid
+                          </span>
+                          {verification.subscription && (
+                            <Badge variant="secondary" className="text-xs">
+                              {verification.subscription}
+                            </Badge>
+                          )}
+                          {verification.character_limit && (
+                            <span className="text-muted-foreground">
+                              {(verification.character_count || 0).toLocaleString()} / {verification.character_limit.toLocaleString()} chars
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="flex items-center gap-1 text-destructive">
+                          <XCircle className="h-3 w-3" />
+                          {verification.error}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="flex items-center gap-3">
-                  <Badge variant="outline" className="text-xs">
-                    Uses: {key.usage_count}
-                  </Badge>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => handleRemoveKey(key.id)}
-                    disabled={removeKey.isPending}
-                    className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div className="text-center py-6 text-muted-foreground">
