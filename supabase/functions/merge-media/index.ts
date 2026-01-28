@@ -337,11 +337,15 @@ serve(async (req) => {
   }
 });
 
+const MERGE_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
 async function processMediaMerge(
   jobId: string, 
   request: MergeRequest,
   steps: { validateStepId?: string; mergeStepId?: string; finalizeStepId?: string }
 ) {
+  const mergeStartTime = Date.now();
+  
   try {
     // Step 1: Validate inputs
     if (steps.validateStepId) {
@@ -350,6 +354,7 @@ async function processMediaMerge(
           images: request.images?.length || 0,
           videos: request.videos?.length || 0,
           hasAudio: !!request.audio,
+          stage: "validating_inputs",
         },
       });
     }
@@ -362,13 +367,25 @@ async function processMediaMerge(
       .eq("id", jobId);
 
     if (steps.validateStepId) {
-      await updateJobStep(steps.validateStepId, "completed");
+      await updateJobStep(steps.validateStepId, "completed", {
+        outputData: {
+          images: request.images?.length || 0,
+          videos: request.videos?.length || 0,
+          hasAudio: !!request.audio,
+          stage: "validated",
+          validation_time_ms: Date.now() - mergeStartTime,
+        },
+      });
     }
 
     // Step 2: Merge media
     if (steps.mergeStepId) {
       await updateJobStep(steps.mergeStepId, "processing", {
-        outputData: { provider: "huggingface-space", endpoint: "merge" },
+        outputData: { 
+          provider: "huggingface-space", 
+          endpoint: "merge",
+          stage: "sending_to_ffmpeg",
+        },
       });
     }
 
@@ -379,46 +396,102 @@ async function processMediaMerge(
       .update({ progress: 30 })
       .eq("id", jobId);
 
-    // While waiting for the external merge, keep progress moving a bit (and allow cancellation)
+    // Timeout controller for merge operation
+    const controller = new AbortController();
+    let timeoutId: number | undefined;
     let mergeDone = false;
+    let timeoutReached = false;
+
+    // Setup 10-minute timeout
+    timeoutId = setTimeout(() => {
+      if (!mergeDone) {
+        timeoutReached = true;
+        controller.abort();
+      }
+    }, MERGE_TIMEOUT_MS);
+
+    // Progress ticker with heartbeat updates
     const ticker = (async () => {
       let p = 30;
-      while (!mergeDone && p < 70) {
-        await delay(3500);
+      const startTick = Date.now();
+      while (!mergeDone && p < 85) {
+        await delay(3000);
         if (await isJobCancelled(jobId)) return;
-        p += 5;
+        
+        p = Math.min(85, p + 3);
+        const elapsed = Date.now() - startTick;
+        
         await supabase.from("jobs").update({ progress: p }).eq("id", jobId);
+        
+        // Heartbeat update to step with elapsed time
+        if (steps.mergeStepId) {
+          await supabase.from("job_steps").update({
+            output_data: {
+              provider: "huggingface-space",
+              endpoint: "merge",
+              stage: "processing_ffmpeg",
+              elapsed_seconds: Math.round(elapsed / 1000),
+              progress_percent: p,
+            },
+          }).eq("id", steps.mergeStepId);
+        }
       }
     })();
 
     // Call HuggingFace Space for merge
-    const result = await mergeMediaWithFFmpeg({
-      images: request.images,
-      videos: request.videos,
-      audio: request.audio,
-      output_format: "mp4",
-    });
+    let result: { status: string; output_url?: string; error?: string };
+    
+    try {
+      result = await mergeMediaWithFFmpeg({
+        images: request.images,
+        videos: request.videos,
+        audio: request.audio,
+        output_format: "mp4",
+      });
+    } catch (mergeError) {
+      if (timeoutReached) {
+        throw new Error(`عملية الدمج تجاوزت الحد الزمني (10 دقائق). قد يكون السيرفر مشغولاً أو الملفات كبيرة جداً.`);
+      }
+      throw mergeError;
+    } finally {
+      mergeDone = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    }
 
-    mergeDone = true;
     await ticker.catch(() => undefined);
 
     if (await isJobCancelled(jobId)) return;
 
+    if (timeoutReached) {
+      throw new Error(`عملية الدمج تجاوزت الحد الزمني (10 دقائق). قد يكون السيرفر مشغولاً أو الملفات كبيرة جداً.`);
+    }
+
     await supabase
       .from("jobs")
-      .update({ progress: 80 })
+      .update({ progress: 90 })
       .eq("id", jobId);
 
     if (result.status === "failed") {
       throw new Error(result.error || "Merge failed");
     }
 
+    const mergeDuration = Date.now() - mergeStartTime;
+
     if (steps.mergeStepId) {
-      await updateJobStep(steps.mergeStepId, "completed");
+      await updateJobStep(steps.mergeStepId, "completed", {
+        outputData: {
+          provider: "huggingface-space",
+          stage: "merge_complete",
+          duration_seconds: Math.round(mergeDuration / 1000),
+          output_url: result.output_url,
+        },
+      });
     }
 
     if (steps.finalizeStepId) {
-      await updateJobStep(steps.finalizeStepId, "processing");
+      await updateJobStep(steps.finalizeStepId, "processing", {
+        outputData: { stage: "finalizing" },
+      });
     }
 
     // Mark as complete
@@ -433,7 +506,11 @@ async function processMediaMerge(
 
     if (steps.finalizeStepId) {
       await updateJobStep(steps.finalizeStepId, "completed", {
-        outputData: { output_url: result.output_url },
+        outputData: { 
+          output_url: result.output_url,
+          stage: "complete",
+          total_duration_seconds: Math.round((Date.now() - mergeStartTime) / 1000),
+        },
       });
     }
 
@@ -453,12 +530,24 @@ async function processMediaMerge(
     const error = err instanceof Error ? err : new Error(String(err));
     console.error("Merge process error:", error);
 
+    const errorOutput = {
+      error: error.message,
+      stage: "failed",
+      elapsed_seconds: Math.round((Date.now() - mergeStartTime) / 1000),
+    };
+
     if (steps.mergeStepId) {
-      await updateJobStep(steps.mergeStepId, "failed", { errorMessage: error.message });
+      await updateJobStep(steps.mergeStepId, "failed", { 
+        errorMessage: error.message,
+        outputData: errorOutput,
+      });
     }
 
     if (steps.finalizeStepId) {
-      await updateJobStep(steps.finalizeStepId, "failed", { errorMessage: error.message });
+      await updateJobStep(steps.finalizeStepId, "failed", { 
+        errorMessage: error.message,
+        outputData: errorOutput,
+      });
     }
     
     await supabase
