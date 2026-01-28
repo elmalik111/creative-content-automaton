@@ -14,7 +14,7 @@ serve(async (req) => {
   }
 
   try {
-    // ===== SECURITY: Require Valid JWT with Admin Role =====
+    // ===== SECURITY: Require any authenticated user =====
     const authHeader = req.headers.get("Authorization");
     
     if (!authHeader?.startsWith("Bearer ")) {
@@ -31,21 +31,6 @@ serve(async (req) => {
       return new Response(
         JSON.stringify({ error: "Invalid or expired token" }),
         { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-    
-    // Check if user is admin
-    const { data: roleData } = await supabase
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", data.user.id)
-      .eq("role", "admin")
-      .maybeSingle();
-    
-    if (!roleData) {
-      return new Response(
-        JSON.stringify({ error: "Admin access required" }),
-        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 

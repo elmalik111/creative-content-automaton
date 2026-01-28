@@ -24,7 +24,7 @@ const App = () => (
           <Route
             path="/"
             element={
-              <ProtectedRoute requireAdmin>
+              <ProtectedRoute>
                 <Index />
               </ProtectedRoute>
             }
@@ -32,7 +32,7 @@ const App = () => (
           <Route
             path="/job/:id"
             element={
-              <ProtectedRoute requireAdmin>
+              <ProtectedRoute>
                 <JobDetails />
               </ProtectedRoute>
             }
