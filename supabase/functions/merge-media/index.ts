@@ -7,6 +7,12 @@ interface MergeRequest {
   videos?: string[];
   audio: string;
   callback_url?: string;
+  // Compatibility aliases (some clients send these)
+  imageUrl?: string;
+  audioUrl?: string;
+  image_url?: string;
+  audio_url?: string;
+  audio_path?: string;
 }
 
 async function validateApiKey(apiKey: string): Promise<boolean> {
@@ -88,7 +94,22 @@ serve(async (req) => {
       }
     }
 
-    const body: MergeRequest = await req.json();
+    const rawBody: MergeRequest = await req.json();
+
+    // Normalize body to the canonical shape expected by this API
+    const body: MergeRequest = {
+      ...rawBody,
+      images:
+        rawBody.images && rawBody.images.length > 0
+          ? rawBody.images
+          : rawBody.imageUrl
+            ? [rawBody.imageUrl]
+            : rawBody.image_url
+              ? [rawBody.image_url]
+              : undefined,
+      audio:
+        rawBody.audio || rawBody.audioUrl || rawBody.audio_url || rawBody.audio_path || "",
+    };
 
     // Validate required fields
     if (!body.audio) {
