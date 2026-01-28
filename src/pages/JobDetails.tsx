@@ -22,6 +22,7 @@ import {
 import { formatDistanceToNow, format } from 'date-fns';
 
 const stepIcons: Record<string, React.ElementType> = {
+  'validate_inputs': FileVideo,
   'script_generation': FileVideo,
   'voice_generation': Mic,
   'image_generation': Image,
@@ -29,9 +30,11 @@ const stepIcons: Record<string, React.ElementType> = {
   'publishing': Send,
   'upload': FileVideo,
   'merge': Merge,
+  'finalize': FileVideo,
 };
 
 const stepLabels: Record<string, string> = {
+  'validate_inputs': 'Validate Inputs',
   'script_generation': 'Script Generation',
   'voice_generation': 'Voice Generation',
   'image_generation': 'Image Generation',
@@ -39,6 +42,7 @@ const stepLabels: Record<string, string> = {
   'publishing': 'Publishing',
   'upload': 'File Upload',
   'merge': 'Video Merge',
+  'finalize': 'Finalize',
 };
 
 export default function JobDetails() {

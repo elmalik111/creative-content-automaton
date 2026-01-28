@@ -7,6 +7,9 @@ interface MergeRequest {
   videos?: string[];
   audio: string;
   callback_url?: string;
+  // Debug/health check
+  test?: boolean;
+  health?: boolean;
   // Compatibility aliases (some clients send these)
   imageUrl?: string;
   audioUrl?: string;
@@ -14,6 +17,8 @@ interface MergeRequest {
   audio_url?: string;
   audio_path?: string;
 }
+
+const CANCELLED_BY_USER = "Cancelled by user";
 
 async function validateApiKey(apiKey: string): Promise<boolean> {
   if (!apiKey) return false;
@@ -53,7 +58,11 @@ async function createJobStep(jobId: string, stepName: string, stepOrder: number)
   return data?.id;
 }
 
-async function updateJobStep(stepId: string, status: string, errorMessage?: string) {
+async function updateJobStep(
+  stepId: string,
+  status: string,
+  opts?: { errorMessage?: string; outputData?: unknown }
+) {
   const updates: Record<string, unknown> = { status };
   
   if (status === "processing") {
@@ -62,14 +71,30 @@ async function updateJobStep(stepId: string, status: string, errorMessage?: stri
     updates.completed_at = new Date().toISOString();
   }
   
-  if (errorMessage) {
-    updates.error_message = errorMessage;
-  }
+  if (opts?.errorMessage) updates.error_message = opts.errorMessage;
+  if (opts?.outputData !== undefined) updates.output_data = opts.outputData;
 
   await supabase
     .from("job_steps")
     .update(updates)
     .eq("id", stepId);
+}
+
+async function isJobCancelled(jobId: string): Promise<boolean> {
+  const { data } = await supabase
+    .from("jobs")
+    .select("status, error_message")
+    .eq("id", jobId)
+    .maybeSingle();
+
+  if (!data) return false;
+  if (data.status !== "failed") return false;
+  const msg = (data.error_message || "").toLowerCase();
+  return msg.includes("cancel");
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 serve(async (req) => {
@@ -94,7 +119,18 @@ serve(async (req) => {
       }
     }
 
-    const rawBody: MergeRequest = await req.json();
+    const rawBody: MergeRequest = await req.json().catch(() => ({} as MergeRequest));
+
+    // Health/test mode for UI debuggers (prevents FunctionsHttpError in simple pings)
+    if (rawBody?.test || rawBody?.health) {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          message: "merge-media is reachable. Provide imageUrl/audioUrl to start a real merge job.",
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
     // Normalize body to the canonical shape expected by this API
     const body: MergeRequest = {
@@ -148,11 +184,12 @@ serve(async (req) => {
     }
 
     // Create job steps
-    const uploadStepId = await createJobStep(job.id, "upload", 1);
+    const validateStepId = await createJobStep(job.id, "validate_inputs", 1);
     const mergeStepId = await createJobStep(job.id, "merge", 2);
+    const finalizeStepId = await createJobStep(job.id, "finalize", 3);
 
     // Start merge process in background (non-blocking)
-    processMediaMerge(job.id, body, { uploadStepId, mergeStepId }).catch(console.error);
+    processMediaMerge(job.id, body, { validateStepId, mergeStepId, finalizeStepId }).catch(console.error);
 
     return new Response(
       JSON.stringify({
@@ -175,32 +212,56 @@ serve(async (req) => {
 async function processMediaMerge(
   jobId: string, 
   request: MergeRequest,
-  steps: { uploadStepId?: string; mergeStepId?: string }
+  steps: { validateStepId?: string; mergeStepId?: string; finalizeStepId?: string }
 ) {
   try {
-    // Step 1: Upload/Validate files
-    if (steps.uploadStepId) {
-      await updateJobStep(steps.uploadStepId, "processing");
+    // Step 1: Validate inputs
+    if (steps.validateStepId) {
+      await updateJobStep(steps.validateStepId, "processing", {
+        outputData: {
+          images: request.images?.length || 0,
+          videos: request.videos?.length || 0,
+          hasAudio: !!request.audio,
+        },
+      });
     }
+
+    if (await isJobCancelled(jobId)) return;
     
     await supabase
       .from("jobs")
       .update({ progress: 10 })
       .eq("id", jobId);
 
-    if (steps.uploadStepId) {
-      await updateJobStep(steps.uploadStepId, "completed");
+    if (steps.validateStepId) {
+      await updateJobStep(steps.validateStepId, "completed");
     }
 
     // Step 2: Merge media
     if (steps.mergeStepId) {
-      await updateJobStep(steps.mergeStepId, "processing");
+      await updateJobStep(steps.mergeStepId, "processing", {
+        outputData: { provider: "huggingface-space", endpoint: "merge" },
+      });
     }
+
+    if (await isJobCancelled(jobId)) return;
 
     await supabase
       .from("jobs")
       .update({ progress: 30 })
       .eq("id", jobId);
+
+    // While waiting for the external merge, keep progress moving a bit (and allow cancellation)
+    let mergeDone = false;
+    const ticker = (async () => {
+      let p = 30;
+      while (!mergeDone && p < 70) {
+        await delay(3500);
+        if (await isJobCancelled(jobId)) return;
+        p += 5;
+        await supabase.from("jobs").update({ progress: p }).eq("id", jobId);
+      }
+    })();
 
     // Call HuggingFace Space for merge
     const result = await mergeMediaWithFFmpeg({
@@ -209,6 +270,11 @@ async function processMediaMerge(
       audio: request.audio,
       output_format: "mp4",
     });
+
+    mergeDone = true;
+    await ticker.catch(() => undefined);
+
+    if (await isJobCancelled(jobId)) return;
 
     await supabase
       .from("jobs")
@@ -223,6 +289,10 @@ async function processMediaMerge(
       await updateJobStep(steps.mergeStepId, "completed");
     }
 
+    if (steps.finalizeStepId) {
+      await updateJobStep(steps.finalizeStepId, "processing");
+    }
+
     // Mark as complete
     await supabase
       .from("jobs")
@@ -232,6 +302,12 @@ async function processMediaMerge(
         output_url: result.output_url,
       })
       .eq("id", jobId);
+
+    if (steps.finalizeStepId) {
+      await updateJobStep(steps.finalizeStepId, "completed", {
+        outputData: { output_url: result.output_url },
+      });
+    }
 
     // Send callback if provided
     if (request.callback_url) {
@@ -250,7 +326,11 @@ async function processMediaMerge(
     console.error("Merge process error:", error);
 
     if (steps.mergeStepId) {
-      await updateJobStep(steps.mergeStepId, "failed", error.message);
+      await updateJobStep(steps.mergeStepId, "failed", { errorMessage: error.message });
+    }
+
+    if (steps.finalizeStepId) {
+      await updateJobStep(steps.finalizeStepId, "failed", { errorMessage: error.message });
     }
     
     await supabase

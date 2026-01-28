@@ -8,6 +8,7 @@ import { useApiKeys } from '@/hooks/useApiKeys';
 import { FlaskConical, Play, Loader2, CheckCircle2, XCircle, Upload, ChevronDown, ChevronUp } from 'lucide-react';
 import { FileUploader } from './FileUploader';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { JobTracker } from './JobTracker';
 
 const SUPABASE_URL = "https://cidxcujlfkrzvvmljxqs.supabase.co";
 
@@ -26,6 +27,7 @@ export function ApiTester() {
   const [requestBody, setRequestBody] = useState(DEFAULT_REQUEST_BODY);
   const [isLoading, setIsLoading] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
+  const [trackedJobId, setTrackedJobId] = useState<string>('');
   const [response, setResponse] = useState<{
     status: number;
     statusText: string;
@@ -83,7 +85,21 @@ export function ApiTester() {
         body: JSON.stringify(parsedBody),
       });
 
-      const data = await res.json();
+      const text = await res.text();
+      let data: unknown = text;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        // keep as text
+      }
+
+      // If a job was created, start tracking it
+      if (res.ok && typeof data === 'object' && data && 'job_id' in (data as Record<string, unknown>)) {
+        const jobId = (data as Record<string, unknown>).job_id;
+        if (typeof jobId === 'string' && jobId.length > 0) {
+          setTrackedJobId(jobId);
+        }
+      }
 
       setResponse({
         status: res.status,
@@ -122,9 +138,13 @@ export function ApiTester() {
             Endpoint: <code className="text-xs bg-background px-1.5 py-0.5 rounded">POST /functions/v1/merge-media</code>
           </p>
           <p className="text-xs text-muted-foreground">
-            Test your API keys by sending a request to the merge-media endpoint
+            ارفع صورة + صوت من "Upload Files" (Public URLs) ثم اضغط Test — وسيظهر تتبّع العملية خطوة بخطوة.
           </p>
         </div>
+
+        {trackedJobId && (
+          <JobTracker jobId={trackedJobId} onStopTracking={() => setTrackedJobId('')} />
+        )}
 
         {/* File Upload Section */}
         <Collapsible open={isUploadOpen} onOpenChange={setIsUploadOpen}>

@@ -172,9 +172,10 @@ async function testInstagramPost(
     return { success: false, error: "Instagram not connected" };
   }
 
-  // Use a real public test image if not provided
-  // This is a simple 1x1 pink pixel hosted on a public CDN
-  const testImageUrl = imageUrl || "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png";
+  // Use a real public *direct* image URL if not provided (IG is picky about content-type/redirects)
+  const testImageUrl =
+    imageUrl ||
+    "https://upload.wikimedia.org/wikipedia/commons/3/3f/Fronalpstock_big.jpg";
 
   console.log("Testing Instagram with image:", testImageUrl);
 
