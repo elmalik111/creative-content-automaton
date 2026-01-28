@@ -1,8 +1,51 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 
 const YOUTUBE_CLIENT_ID = Deno.env.get("YOUTUBE_CLIENT_ID");
 const YOUTUBE_CLIENT_SECRET = Deno.env.get("YOUTUBE_CLIENT_SECRET");
+
+// ===== AUTH HELPER: Require admin role for POST =====
+async function validateAdminAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+  const authHeader = req.headers.get("Authorization");
+  
+  // Check for service role key (internal calls)
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (authHeader === `Bearer ${serviceRoleKey}`) {
+    return { valid: true };
+  }
+  
+  // Check for user JWT
+  if (!authHeader?.startsWith("Bearer ")) {
+    return { valid: false, error: "Authorization header required" };
+  }
+  
+  const token = authHeader.replace("Bearer ", "");
+  const anonClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  
+  const { data: userData, error: userError } = await anonClient.auth.getUser(token);
+  if (userError || !userData?.user) {
+    return { valid: false, error: "Invalid or expired token" };
+  }
+  
+  // Check admin role using service role client
+  const { data: roleData } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", userData.user.id)
+    .eq("role", "admin")
+    .maybeSingle();
+  
+  if (!roleData) {
+    return { valid: false, error: "Admin access required" };
+  }
+  
+  return { valid: true };
+}
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -15,7 +58,7 @@ serve(async (req) => {
     const redirectUri = url.searchParams.get("redirect_uri") || 
       `${url.origin.replace('/functions/v1/google-auth', '')}/auth/callback`;
 
-    // Generate OAuth URL
+    // Generate OAuth URL (public - no auth needed)
     if (req.method === "GET" && action === "auth_url") {
       if (!YOUTUBE_CLIENT_ID) {
         return new Response(
@@ -44,8 +87,17 @@ serve(async (req) => {
       );
     }
 
-    // Exchange code for tokens
+    // Exchange code for tokens (requires admin auth)
     if (req.method === "POST") {
+      // ===== SECURITY: Require admin for token exchange =====
+      const auth = await validateAdminAuth(req);
+      if (!auth.valid) {
+        return new Response(
+          JSON.stringify({ error: auth.error }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
       const body = await req.json();
       const { code, redirect_uri } = body;
 

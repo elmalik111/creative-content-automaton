@@ -246,7 +246,39 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      oauth_tokens_safe: {
+        Row: {
+          account_name: string | null
+          created_at: string | null
+          expires_at: string | null
+          id: string | null
+          is_active: boolean | null
+          platform: string | null
+          scope: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          account_name?: string | null
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string | null
+          is_active?: boolean | null
+          platform?: string | null
+          scope?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          account_name?: string | null
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string | null
+          is_active?: boolean | null
+          platform?: string | null
+          scope?: string | null
+          updated_at?: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       has_role: {

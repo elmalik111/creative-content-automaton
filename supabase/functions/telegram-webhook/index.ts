@@ -224,6 +224,26 @@ serve(async (req) => {
   }
 });
 
+// ===== INPUT VALIDATION CONSTANTS =====
+const MAX_TITLE_LENGTH = 200;
+const MAX_DESCRIPTION_LENGTH = 1000;
+const MIN_SCENE_COUNT = 1;
+const MAX_SCENE_COUNT = 20;
+const MIN_DURATION = 10;
+const MAX_DURATION = 300;
+const VALID_VOICE_TYPES = ["male_arabic", "female_arabic"];
+
+/**
+ * Sanitizes text input to prevent injection attacks
+ */
+function sanitizeText(text: string, maxLength: number): string {
+  // Trim and truncate
+  let sanitized = text.trim().slice(0, maxLength);
+  // Remove control characters except newlines
+  sanitized = sanitized.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
+  return sanitized;
+}
+
 function parseCreateCommand(text: string): CreateCommand | null {
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
   
@@ -239,10 +259,10 @@ function parseCreateCommand(text: string): CreateCommand | null {
     
     switch (key.trim()) {
       case "عنوان":
-        data.title = value;
+        data.title = sanitizeText(value, MAX_TITLE_LENGTH);
         break;
       case "وصف":
-        data.description = value;
+        data.description = sanitizeText(value, MAX_DESCRIPTION_LENGTH);
         break;
       case "نوع_الصوت":
         data.voice_type = value;
@@ -256,7 +276,25 @@ function parseCreateCommand(text: string): CreateCommand | null {
     }
   }
 
-  if (!data.title || !data.description) return null;
+  // ===== SECURITY: Validate required fields =====
+  if (!data.title || data.title.length === 0) return null;
+  if (!data.description || data.description.length === 0) return null;
+
+  // ===== SECURITY: Validate voice type =====
+  if (data.voice_type && !VALID_VOICE_TYPES.includes(data.voice_type)) {
+    data.voice_type = "male_arabic"; // Default to safe value
+  }
+
+  // ===== SECURITY: Validate numeric bounds =====
+  const sceneCount = data.scene_count || 5;
+  if (sceneCount < MIN_SCENE_COUNT || sceneCount > MAX_SCENE_COUNT) {
+    data.scene_count = Math.max(MIN_SCENE_COUNT, Math.min(MAX_SCENE_COUNT, sceneCount));
+  }
+
+  const duration = data.duration || 60;
+  if (duration < MIN_DURATION || duration > MAX_DURATION) {
+    data.duration = Math.max(MIN_DURATION, Math.min(MAX_DURATION, duration));
+  }
 
   return {
     title: data.title,
