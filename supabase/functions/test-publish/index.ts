@@ -107,52 +107,49 @@ async function testFacebookPost(
     return { success: false, error: "Facebook not connected" };
   }
 
+  console.log("Testing Facebook connection with token...");
+
   // Get page access token (first available page)
   const pagesResponse = await fetch(
     `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token&access_token=${tokenData.access_token}`
   );
 
   const pagesData = await pagesResponse.json();
+  console.log("Pages response:", JSON.stringify(pagesData));
 
   if (pagesData.error) {
-    return { success: false, error: pagesData.error.message };
+    return { success: false, error: `Facebook API: ${pagesData.error.message}` };
   }
 
   const page = pagesData.data?.[0];
 
   if (!page) {
-    return { success: false, error: "No Facebook page found. Please connect a page." };
+    return { success: false, error: "No Facebook page found. Please connect a page with pages_manage_posts permission." };
   }
 
-  // Post to the page
-  const postEndpoint = imageUrl 
-    ? `https://graph.facebook.com/v18.0/${page.id}/photos`
-    : `https://graph.facebook.com/v18.0/${page.id}/feed`;
+  console.log(`Posting to page: ${page.name} (${page.id})`);
 
-  const postBody: Record<string, string> = {
-    access_token: page.access_token,
-  };
-
-  if (imageUrl) {
-    postBody.url = imageUrl;
-    postBody.caption = content;
-  } else {
-    postBody.message = content;
-  }
-
-  const postResponse = await fetch(postEndpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(postBody),
-  });
+  // Simple text post to the page
+  const postResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${page.id}/feed`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        message: content,
+        access_token: page.access_token,
+      }),
+    }
+  );
 
   const postData = await postResponse.json();
+  console.log("Post response:", JSON.stringify(postData));
 
   if (postData.error) {
-    return { success: false, error: postData.error.message };
+    return { success: false, error: `Post failed: ${postData.error.message}` };
   }
 
-  const postId = postData.id || postData.post_id;
+  const postId = postData.id;
 
   return { 
     success: true, 
@@ -175,20 +172,22 @@ async function testInstagramPost(
     return { success: false, error: "Instagram not connected" };
   }
 
-  if (!imageUrl) {
-    return { success: false, error: "Instagram requires an image. Please provide image_url." };
-  }
+  // Use a real public test image if not provided
+  // This is a simple 1x1 pink pixel hosted on a public CDN
+  const testImageUrl = imageUrl || "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png";
 
-  // Get Instagram Business Account ID
-  // First, get Facebook pages
+  console.log("Testing Instagram with image:", testImageUrl);
+
+  // Get Instagram Business Account ID via Facebook pages
   const pagesResponse = await fetch(
-    `https://graph.facebook.com/v18.0/me/accounts?fields=id,instagram_business_account&access_token=${tokenData.access_token}`
+    `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,instagram_business_account{id,username}&access_token=${tokenData.access_token}`
   );
 
   const pagesData = await pagesResponse.json();
+  console.log("Pages with IG:", JSON.stringify(pagesData));
 
   if (pagesData.error) {
-    return { success: false, error: pagesData.error.message };
+    return { success: false, error: `Facebook API: ${pagesData.error.message}` };
   }
 
   // Find page with Instagram business account
@@ -197,19 +196,23 @@ async function testInstagramPost(
   );
 
   if (!pageWithIG) {
-    return { success: false, error: "No Instagram Business Account found. Please connect your Instagram to a Facebook Page." };
+    return { 
+      success: false, 
+      error: "No Instagram Business Account found. Make sure your Instagram is linked to a Facebook Page and you have instagram_basic + instagram_content_publish permissions." 
+    };
   }
 
   const igAccountId = pageWithIG.instagram_business_account.id;
+  console.log(`Using IG account: ${igAccountId}`);
 
   // Create media container
   const containerResponse = await fetch(
     `https://graph.facebook.com/v18.0/${igAccountId}/media`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image_url: imageUrl,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        image_url: testImageUrl,
         caption: content,
         access_token: tokenData.access_token,
       }),
@@ -217,18 +220,22 @@ async function testInstagramPost(
   );
 
   const containerData = await containerResponse.json();
+  console.log("Container response:", JSON.stringify(containerData));
 
   if (containerData.error) {
-    return { success: false, error: containerData.error.message };
+    return { success: false, error: `Container creation failed: ${containerData.error.message}` };
   }
+
+  // Wait a moment for the container to be ready
+  await new Promise(resolve => setTimeout(resolve, 3000));
 
   // Publish the container
   const publishResponse = await fetch(
     `https://graph.facebook.com/v18.0/${igAccountId}/media_publish`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
         creation_id: containerData.id,
         access_token: tokenData.access_token,
       }),
@@ -236,13 +243,20 @@ async function testInstagramPost(
   );
 
   const publishData = await publishResponse.json();
+  console.log("Publish response:", JSON.stringify(publishData));
 
   if (publishData.error) {
-    return { success: false, error: publishData.error.message };
+    return { success: false, error: `Publish failed: ${publishData.error.message}` };
   }
+
+  // Get permalink
+  const mediaResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${publishData.id}?fields=permalink&access_token=${tokenData.access_token}`
+  );
+  const mediaData = await mediaResponse.json();
 
   return { 
     success: true, 
-    post_url: `https://instagram.com/p/${publishData.id}` 
+    post_url: mediaData.permalink || `https://instagram.com` 
   };
 }
