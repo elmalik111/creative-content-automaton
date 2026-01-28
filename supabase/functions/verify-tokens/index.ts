@@ -10,8 +10,8 @@ interface VerifyRequest {
   token?: string; // For ElevenLabs specific key verification
 }
 
-// ===== AUTH HELPER: Require admin role =====
-async function validateAdminAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+// ===== AUTH HELPER: Require any authenticated user =====
+async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
   const authHeader = req.headers.get("Authorization");
   
   // Check for service role key (internal calls)
@@ -37,18 +37,6 @@ async function validateAdminAuth(req: Request): Promise<{ valid: boolean; error?
     return { valid: false, error: "Invalid or expired token" };
   }
   
-  // Check admin role using service role client
-  const { data: roleData } = await supabase
-    .from("user_roles")
-    .select("role")
-    .eq("user_id", userData.user.id)
-    .eq("role", "admin")
-    .maybeSingle();
-  
-  if (!roleData) {
-    return { valid: false, error: "Admin access required" };
-  }
-  
   return { valid: true };
 }
 
@@ -58,8 +46,8 @@ serve(async (req) => {
   }
 
   try {
-    // ===== SECURITY: Require admin authentication =====
-    const auth = await validateAdminAuth(req);
+    // ===== SECURITY: Require any authenticated user =====
+    const auth = await validateAuth(req);
     if (!auth.valid) {
       return new Response(
         JSON.stringify({ error: auth.error }),
