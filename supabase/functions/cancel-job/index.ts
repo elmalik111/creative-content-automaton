@@ -1,5 +1,36 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
+
+// ===== AUTH HELPER =====
+async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+  const authHeader = req.headers.get("Authorization");
+  
+  // Check for service role key (internal calls)
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (authHeader === `Bearer ${serviceRoleKey}`) {
+    return { valid: true };
+  }
+  
+  // Check for user JWT
+  if (!authHeader?.startsWith("Bearer ")) {
+    return { valid: false, error: "Authorization header required" };
+  }
+  
+  const token = authHeader.replace("Bearer ", "");
+  const anonClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  
+  const { data, error } = await anonClient.auth.getUser(token);
+  if (error || !data?.user) {
+    return { valid: false, error: "Invalid or expired token" };
+  }
+  
+  return { valid: true };
+}
 
 serve(async (req) => {
   // Handle CORS preflight
@@ -8,6 +39,15 @@ serve(async (req) => {
   }
 
   try {
+    // ===== SECURITY: Validate authentication =====
+    const auth = await validateAuth(req);
+    if (!auth.valid) {
+      return new Response(
+        JSON.stringify({ error: auth.error }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const body = await req.json().catch(() => ({}));
     const jobId = body.jobId || body.job_id;
 

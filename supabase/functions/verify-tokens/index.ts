@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 
 const YOUTUBE_CLIENT_ID = Deno.env.get("YOUTUBE_CLIENT_ID");
@@ -9,12 +10,63 @@ interface VerifyRequest {
   token?: string; // For ElevenLabs specific key verification
 }
 
+// ===== AUTH HELPER: Require admin role =====
+async function validateAdminAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+  const authHeader = req.headers.get("Authorization");
+  
+  // Check for service role key (internal calls)
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (authHeader === `Bearer ${serviceRoleKey}`) {
+    return { valid: true };
+  }
+  
+  // Check for user JWT
+  if (!authHeader?.startsWith("Bearer ")) {
+    return { valid: false, error: "Authorization header required" };
+  }
+  
+  const token = authHeader.replace("Bearer ", "");
+  const anonClient = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  
+  const { data: userData, error: userError } = await anonClient.auth.getUser(token);
+  if (userError || !userData?.user) {
+    return { valid: false, error: "Invalid or expired token" };
+  }
+  
+  // Check admin role using service role client
+  const { data: roleData } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", userData.user.id)
+    .eq("role", "admin")
+    .maybeSingle();
+  
+  if (!roleData) {
+    return { valid: false, error: "Admin access required" };
+  }
+  
+  return { valid: true };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    // ===== SECURITY: Require admin authentication =====
+    const auth = await validateAdminAuth(req);
+    if (!auth.valid) {
+      return new Response(
+        JSON.stringify({ error: auth.error }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const body: VerifyRequest = await req.json();
     const { platform, token } = body;
 
