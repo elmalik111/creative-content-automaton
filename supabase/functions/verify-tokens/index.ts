@@ -169,40 +169,108 @@ async function verifyInstagram(): Promise<Response> {
     );
   }
 
-  // Verify by getting user info from Graph API
-  const userResponse = await fetch(
-    `https://graph.facebook.com/v18.0/me?fields=id,username,name,account_type&access_token=${tokenData.access_token}`
-  );
+  try {
+    // First try to get Instagram Business Account through Facebook Pages
+    const pagesResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,instagram_business_account{id,username,name,profile_picture_url,followers_count}&access_token=${tokenData.access_token}`
+    );
 
-  const userData = await userResponse.json();
+    const pagesData = await pagesResponse.json();
 
-  if (userData.error) {
+    if (pagesData.error) {
+      // Fallback: Try direct user endpoint (for personal accounts)
+      const userResponse = await fetch(
+        `https://graph.facebook.com/v18.0/me?fields=id,name&access_token=${tokenData.access_token}`
+      );
+      const userData = await userResponse.json();
+      
+      if (userData.error) {
+        return new Response(
+          JSON.stringify({ valid: false, error: userData.error.message }),
+          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          valid: true,
+          account_info: {
+            id: userData.id,
+            name: userData.name,
+            type: "personal",
+            note: "For Instagram publishing, connect a Business/Creator account linked to a Facebook Page"
+          },
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Find pages with Instagram Business Account
+    const instagramAccounts = pagesData.data?.filter(
+      (page: { instagram_business_account?: unknown }) => page.instagram_business_account
+    ).map((page: { 
+      id: string; 
+      name: string;
+      instagram_business_account?: { 
+        id: string; 
+        username?: string; 
+        name?: string;
+        profile_picture_url?: string;
+        followers_count?: number;
+      } 
+    }) => ({
+      page_id: page.id,
+      page_name: page.name,
+      instagram_id: page.instagram_business_account?.id,
+      username: page.instagram_business_account?.username,
+      name: page.instagram_business_account?.name,
+      picture: page.instagram_business_account?.profile_picture_url,
+      followers: page.instagram_business_account?.followers_count,
+    })) || [];
+
+    if (instagramAccounts.length === 0) {
+      return new Response(
+        JSON.stringify({ 
+          valid: false, 
+          error: "No Instagram Business Account found. Make sure your Instagram is connected to a Facebook Page." 
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const primaryAccount = instagramAccounts[0];
+    
+    // Update account name
+    if (primaryAccount.username && primaryAccount.username !== tokenData.account_name) {
+      await supabase
+        .from("oauth_tokens")
+        .update({ account_name: primaryAccount.username })
+        .eq("id", tokenData.id);
+    }
+
     return new Response(
-      JSON.stringify({ valid: false, error: userData.error.message }),
+      JSON.stringify({
+        valid: true,
+        account_info: {
+          id: primaryAccount.instagram_id,
+          name: primaryAccount.name || primaryAccount.username,
+          username: primaryAccount.username,
+          picture: primaryAccount.picture,
+          followers: primaryAccount.followers,
+          page_id: primaryAccount.page_id,
+          page_name: primaryAccount.page_name,
+          all_accounts: instagramAccounts,
+        },
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    return new Response(
+      JSON.stringify({ valid: false, error: error.message }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-
-  // Update account name if different
-  if (userData.username && userData.username !== tokenData.account_name) {
-    await supabase
-      .from("oauth_tokens")
-      .update({ account_name: userData.username })
-      .eq("id", tokenData.id);
-  }
-
-  return new Response(
-    JSON.stringify({
-      valid: true,
-      account_info: {
-        id: userData.id,
-        name: userData.name || userData.username,
-        username: userData.username,
-        account_type: userData.account_type,
-      },
-    }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
 }
 
 async function verifyFacebook(): Promise<Response> {
@@ -220,53 +288,99 @@ async function verifyFacebook(): Promise<Response> {
     );
   }
 
-  // Get user info and pages
-  const userResponse = await fetch(
-    `https://graph.facebook.com/v18.0/me?fields=id,name,picture&access_token=${tokenData.access_token}`
-  );
+  try {
+    // First, debug the token to check permissions
+    const debugResponse = await fetch(
+      `https://graph.facebook.com/v18.0/debug_token?input_token=${tokenData.access_token}&access_token=${tokenData.access_token}`
+    );
+    const debugData = await debugResponse.json();
+    console.log("Token debug info:", JSON.stringify(debugData));
 
-  const userData = await userResponse.json();
+    // Get user info
+    const userResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me?fields=id,name,picture.type(large)&access_token=${tokenData.access_token}`
+    );
 
-  if (userData.error) {
+    const userData = await userResponse.json();
+
+    if (userData.error) {
+      return new Response(
+        JSON.stringify({ 
+          valid: false, 
+          error: userData.error.message,
+          error_code: userData.error.code,
+          error_type: userData.error.type
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Get pages with required permissions for posting
+    const pagesResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token,picture.type(large),category,fan_count&access_token=${tokenData.access_token}`
+    );
+
+    const pagesData = await pagesResponse.json();
+
+    if (pagesData.error) {
+      console.log("Pages fetch error:", pagesData.error);
+    }
+
+    const pages = pagesData.data?.map((page: { 
+      id: string; 
+      name: string; 
+      access_token?: string;
+      picture?: { data?: { url?: string } };
+      category?: string;
+      fan_count?: number;
+    }) => ({
+      id: page.id,
+      name: page.name,
+      picture: page.picture?.data?.url,
+      category: page.category,
+      fans: page.fan_count,
+      has_page_token: !!page.access_token,
+    })) || [];
+
+    // Update account name if different
+    if (userData.name && userData.name !== tokenData.account_name) {
+      await supabase
+        .from("oauth_tokens")
+        .update({ account_name: userData.name })
+        .eq("id", tokenData.id);
+    }
+
+    // Get permissions
+    const permissionsResponse = await fetch(
+      `https://graph.facebook.com/v18.0/me/permissions?access_token=${tokenData.access_token}`
+    );
+    const permissionsData = await permissionsResponse.json();
+    const permissions = permissionsData.data?.filter(
+      (p: { status: string }) => p.status === 'granted'
+    ).map((p: { permission: string }) => p.permission) || [];
+
     return new Response(
-      JSON.stringify({ valid: false, error: userData.error.message }),
+      JSON.stringify({
+        valid: true,
+        account_info: {
+          id: userData.id,
+          name: userData.name,
+          picture: userData.picture?.data?.url,
+          pages,
+          permissions,
+          pages_count: pages.length,
+          has_publish_permission: permissions.includes('pages_manage_posts') || permissions.includes('publish_pages'),
+        },
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err));
+    return new Response(
+      JSON.stringify({ valid: false, error: error.message }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-
-  // Get pages
-  const pagesResponse = await fetch(
-    `https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token,picture&access_token=${tokenData.access_token}`
-  );
-
-  const pagesData = await pagesResponse.json();
-
-  const pages = pagesData.data?.map((page: { id: string; name: string; picture?: { data?: { url?: string } } }) => ({
-    id: page.id,
-    name: page.name,
-    picture: page.picture?.data?.url,
-  })) || [];
-
-  // Update account name if different
-  if (userData.name && userData.name !== tokenData.account_name) {
-    await supabase
-      .from("oauth_tokens")
-      .update({ account_name: userData.name })
-      .eq("id", tokenData.id);
-  }
-
-  return new Response(
-    JSON.stringify({
-      valid: true,
-      account_info: {
-        id: userData.id,
-        name: userData.name,
-        picture: userData.picture?.data?.url,
-        pages,
-      },
-    }),
-    { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
 }
 
 async function verifyTelegram(): Promise<Response> {
