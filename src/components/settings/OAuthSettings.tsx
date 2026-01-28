@@ -76,20 +76,9 @@ export function OAuthSettings() {
   const handleGoogleOAuth = async () => {
     setIsConnecting(true);
     try {
-      const { data, error } = await supabase.functions.invoke('google-auth', {
-        method: 'GET',
-        body: null,
-        headers: {},
-      });
-
-      // For GET with query params, we need to call differently
       const response = await fetch(
         `https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/google-auth?action=auth_url&redirect_uri=${encodeURIComponent(window.location.origin + '/auth/callback')}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${(await supabase.auth.getSession()).data.session?.access_token || ''}`,
-          },
-        }
+        {}
       );
 
       const responseData = await response.json();
@@ -103,6 +92,7 @@ export function OAuthSettings() {
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       toast.error(error.message);
+    } finally {
       setIsConnecting(false);
     }
   };

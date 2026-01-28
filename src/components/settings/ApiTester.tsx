@@ -10,8 +10,11 @@ import { FlaskConical, Play, Loader2, CheckCircle2, XCircle } from 'lucide-react
 const SUPABASE_URL = "https://cidxcujlfkrzvvmljxqs.supabase.co";
 
 const DEFAULT_REQUEST_BODY = JSON.stringify({
-  images: ["https://example.com/image1.jpg", "https://example.com/image2.jpg"],
-  audio: "https://example.com/audio.mp3",
+  // Supported shapes:
+  // 1) imageUrl/audioUrl (direct)
+  // 2) images/audio (array + url)
+  imageUrl: "https://YOUR_PUBLIC_IMAGE_URL_HERE",
+  audioUrl: "https://YOUR_PUBLIC_AUDIO_URL_HERE",
   callback_url: "https://your-site.com/webhook"
 }, null, 2);
 
