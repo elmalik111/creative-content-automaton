@@ -18,6 +18,47 @@ serve(async (req) => {
   }
 
   try {
+    // ===== SECURITY: Require Service Role Key or Valid JWT =====
+    const authHeader = req.headers.get("Authorization");
+    
+    if (!authHeader?.startsWith("Bearer ")) {
+      return new Response(
+        JSON.stringify({ error: "Authentication required" }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const token = authHeader.replace("Bearer ", "");
+    const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    
+    // Allow service role key (internal calls) or validate JWT
+    if (token !== serviceRoleKey) {
+      // Validate as user JWT
+      const { data, error: authError } = await supabase.auth.getUser(token);
+      
+      if (authError || !data.user) {
+        return new Response(
+          JSON.stringify({ error: "Invalid or expired token" }),
+          { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+      
+      // Check if user is admin
+      const { data: roleData } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", data.user.id)
+        .eq("role", "admin")
+        .maybeSingle();
+      
+      if (!roleData) {
+        return new Response(
+          JSON.stringify({ error: "Admin access required" }),
+          { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     const body: PublishRequest = await req.json();
 
     const results: Record<string, { success: boolean; url?: string; error?: string }> = {};
