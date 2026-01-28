@@ -18,13 +18,51 @@ interface CreateCommand {
   duration: number;
 }
 
+// Rate limiting cache (in-memory for this function instance)
+const rateLimitCache: Map<number, { count: number; resetAt: number }> = new Map();
+const RATE_LIMIT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+const RATE_LIMIT_MAX_REQUESTS = 10; // Max 10 jobs per 5 minutes per chat
+
+function checkRateLimit(chatId: number): boolean {
+  const now = Date.now();
+  const entry = rateLimitCache.get(chatId);
+  
+  if (!entry || now > entry.resetAt) {
+    rateLimitCache.set(chatId, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return true;
+  }
+  
+  if (entry.count >= RATE_LIMIT_MAX_REQUESTS) {
+    return false;
+  }
+  
+  entry.count++;
+  return true;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
+    // ===== SECURITY: Validate Telegram Webhook Secret =====
+    const telegramSecretToken = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
+    const expectedSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
+    
+    // If a secret is configured, enforce validation
+    if (expectedSecret && telegramSecretToken !== expectedSecret) {
+      console.error("Invalid Telegram webhook secret token");
+      return new Response("Unauthorized", { status: 401, headers: corsHeaders });
+    }
+
     const body: TelegramMessage = await req.json();
+    
+    // ===== SECURITY: Validate message structure =====
+    if (!body.message?.chat?.id || typeof body.message.chat.id !== "number") {
+      console.error("Invalid message structure");
+      return new Response("OK", { headers: corsHeaders });
+    }
     
     if (!body.message?.text) {
       return new Response("OK", { headers: corsHeaders });
@@ -63,6 +101,16 @@ serve(async (req) => {
 نوع_الصوت: male_arabic أو female_arabic
 عدد_المشاهد: 5
 الطول: 60`
+        );
+        return new Response("OK", { headers: corsHeaders });
+      }
+
+      // ===== SECURITY: Rate limiting per chat =====
+      if (!checkRateLimit(chatId)) {
+        await sendTelegramMessage(
+          telegramToken,
+          chatId,
+          "⚠️ تباطأ قليلاً! لقد وصلت إلى الحد الأقصى للطلبات (10 كل 5 دقائق). حاول مرة أخرى لاحقاً."
         );
         return new Response("OK", { headers: corsHeaders });
       }
