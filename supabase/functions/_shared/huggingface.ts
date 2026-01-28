@@ -46,13 +46,33 @@ export interface MergeMediaResponse {
 export async function mergeMediaWithFFmpeg(
   request: MergeMediaRequest
 ): Promise<MergeMediaResponse> {
+  // Transform to the format expected by the FFmpeg Space (imageUrl and audioUrl)
+  const imageUrl = request.images?.[0] || request.videos?.[0];
+  const audioUrl = request.audio;
+  
+  if (!imageUrl || !audioUrl) {
+    throw new Error("Missing imageUrl or audioUrl");
+  }
+
+  // Send in the format the server expects
+  const payload = {
+    imageUrl,
+    audioUrl,
+    images: request.images,
+    videos: request.videos,
+    audio: request.audio,
+    output_format: request.output_format || "mp4",
+  };
+
+  console.log("Sending to FFmpeg Space:", JSON.stringify(payload));
+
   const response = await fetch(`${HF_SPACE_URL}/merge`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${HF_READ_TOKEN}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
