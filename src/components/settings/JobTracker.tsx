@@ -87,7 +87,7 @@ export function JobTracker({
     }
   }, [jobId]);
 
-  // Polling every 2 seconds
+  // Polling every 3 seconds
   useEffect(() => {
     if (!jobId) return;
     
@@ -95,7 +95,7 @@ export function JobTracker({
     
     if (!pollingActive) return;
     
-    const interval = setInterval(fetchJobStatus, 2000);
+    const interval = setInterval(fetchJobStatus, 3000);
     return () => clearInterval(interval);
   }, [jobId, pollingActive, fetchJobStatus]);
 
@@ -282,10 +282,13 @@ export function JobTracker({
               </div>
             )}
 
-            {/* Output URL */}
-            {jobStatus.output_url && (
+            {/* Output URL - only show if completed AND has valid https URL */}
+            {jobStatus.is_complete && 
+             jobStatus.status === 'completed' && 
+             jobStatus.output_url && 
+             jobStatus.output_url.startsWith('https') && (
               <div className="p-3 rounded-lg bg-primary/10 border border-primary/30">
-                <div className="text-sm font-medium text-primary">الفيديو جاهز:</div>
+                <div className="text-sm font-medium text-primary">✅ تم الدمج بنجاح - الفيديو جاهز:</div>
                 <a 
                   href={jobStatus.output_url} 
                   target="_blank" 
@@ -294,6 +297,20 @@ export function JobTracker({
                 >
                   {jobStatus.output_url}
                 </a>
+              </div>
+            )}
+            
+            {/* Warning if status is complete but no valid URL */}
+            {jobStatus.is_complete && 
+             jobStatus.status === 'completed' && 
+             (!jobStatus.output_url || !jobStatus.output_url.startsWith('https')) && (
+              <div className="p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+                <div className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
+                  ⚠️ الحالة "مكتمل" لكن لا يوجد رابط فيديو صالح
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  تحقق من السجلات أدناه للتفاصيل
+                </div>
               </div>
             )}
           </>
