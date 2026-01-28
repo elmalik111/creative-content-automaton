@@ -17,3 +17,12 @@ verify_jwt = false
 
 [functions.merge-media]
 verify_jwt = false
+
+[functions.telegram-webhook]
+verify_jwt = false
+
+[functions.ai-generate]
+verify_jwt = false
+
+[functions.publish-video]
+verify_jwt = false
