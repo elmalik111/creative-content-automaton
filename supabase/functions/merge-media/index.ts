@@ -20,6 +20,125 @@ interface MergeRequest {
 
 const CANCELLED_BY_USER = "Cancelled by user";
 
+// ===== INPUT VALIDATION (SECURITY) =====
+
+const ALLOWED_AUDIO_EXTENSIONS = [".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac"];
+const ALLOWED_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"];
+const ALLOWED_VIDEO_EXTENSIONS = [".mp4", ".mov", ".avi", ".webm", ".mkv"];
+
+const MAX_MEDIA_FILES = 50;
+const MAX_FILE_SIZE_MB = 200; // 200MB max per file
+
+/**
+ * Validates URL format and blocks internal/private IPs (SSRF protection)
+ */
+function isValidPublicUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    
+    // Only allow HTTP/HTTPS protocols
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return false;
+    }
+    
+    const hostname = url.hostname.toLowerCase();
+    
+    // Block localhost and loopback
+    if (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "0.0.0.0" ||
+      hostname.startsWith("127.") ||
+      hostname === "::1"
+    ) {
+      return false;
+    }
+    
+    // Block private IP ranges
+    // 10.0.0.0/8
+    if (hostname.match(/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/)) {
+      return false;
+    }
+    // 172.16.0.0/12
+    if (hostname.match(/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/)) {
+      return false;
+    }
+    // 192.168.0.0/16
+    if (hostname.match(/^192\.168\.\d{1,3}\.\d{1,3}$/)) {
+      return false;
+    }
+    // 169.254.0.0/16 (link-local / cloud metadata)
+    if (hostname.match(/^169\.254\.\d{1,3}\.\d{1,3}$/)) {
+      return false;
+    }
+    
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates media URL has correct extension
+ */
+function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
+  try {
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname.toLowerCase();
+    return allowedExtensions.some((ext) => pathname.includes(ext));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates all media URLs in the request
+ */
+function validateMediaUrls(request: MergeRequest): { valid: boolean; error?: string } {
+  // Validate audio URL
+  if (!isValidPublicUrl(request.audio)) {
+    return { valid: false, error: "Invalid audio URL format or blocked internal address" };
+  }
+  if (!hasValidExtension(request.audio, ALLOWED_AUDIO_EXTENSIONS)) {
+    return { valid: false, error: `Invalid audio format. Allowed: ${ALLOWED_AUDIO_EXTENSIONS.join(", ")}` };
+  }
+
+  // Validate images
+  for (const imageUrl of request.images || []) {
+    if (!isValidPublicUrl(imageUrl)) {
+      return { valid: false, error: "Invalid image URL format or blocked internal address" };
+    }
+    if (!hasValidExtension(imageUrl, ALLOWED_IMAGE_EXTENSIONS)) {
+      return { valid: false, error: `Invalid image format. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(", ")}` };
+    }
+  }
+
+  // Validate videos
+  for (const videoUrl of request.videos || []) {
+    if (!isValidPublicUrl(videoUrl)) {
+      return { valid: false, error: "Invalid video URL format or blocked internal address" };
+    }
+    if (!hasValidExtension(videoUrl, ALLOWED_VIDEO_EXTENSIONS)) {
+      return { valid: false, error: `Invalid video format. Allowed: ${ALLOWED_VIDEO_EXTENSIONS.join(", ")}` };
+    }
+  }
+
+  // Validate media count
+  const totalMedia = (request.images?.length || 0) + (request.videos?.length || 0);
+  if (totalMedia > MAX_MEDIA_FILES) {
+    return { valid: false, error: `Too many media files. Maximum: ${MAX_MEDIA_FILES}` };
+  }
+
+  // Validate callback URL if provided
+  if (request.callback_url && !isValidPublicUrl(request.callback_url)) {
+    return { valid: false, error: "Invalid callback URL format" };
+  }
+
+  return { valid: true };
+}
+
+// ===== END INPUT VALIDATION =====
+
 async function validateApiKey(apiKey: string): Promise<boolean> {
   if (!apiKey) return false;
   
@@ -158,6 +277,15 @@ serve(async (req) => {
     if ((!body.images || body.images.length === 0) && (!body.videos || body.videos.length === 0)) {
       return new Response(
         JSON.stringify({ error: "At least one image or video is required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // ===== SECURITY: Validate all URLs before processing =====
+    const validation = validateMediaUrls(body);
+    if (!validation.valid) {
+      return new Response(
+        JSON.stringify({ error: validation.error }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
