@@ -13,12 +13,10 @@ import { JobTracker } from './JobTracker';
 const SUPABASE_URL = "https://cidxcujlfkrzvvmljxqs.supabase.co";
 
 const DEFAULT_REQUEST_BODY = JSON.stringify({
-  // Supported shapes:
-  // 1) imageUrl/audioUrl (direct)
-  // 2) images/audio (array + url)
-  imageUrl: "https://YOUR_PUBLIC_IMAGE_URL_HERE",
-  audioUrl: "https://YOUR_PUBLIC_AUDIO_URL_HERE",
-  callback_url: "https://your-site.com/webhook"
+  // استخدم روابط حقيقية من Storage - لا تستخدم placeholder URLs
+  imageUrl: "",
+  audioUrl: "",
+  callback_url: ""
 }, null, 2);
 
 export function ApiTester() {
@@ -56,6 +54,16 @@ export function ApiTester() {
     }
   }, [requestBody]);
 
+  const isValidHttpsUrl = (url: string): boolean => {
+    if (!url || typeof url !== 'string') return false;
+    try {
+      const parsed = new URL(url);
+      return parsed.protocol === 'https:' && !url.includes('YOUR_') && !url.includes('placeholder');
+    } catch {
+      return false;
+    }
+  };
+
   const handleTest = async () => {
     if (!selectedKey) return;
 
@@ -71,6 +79,30 @@ export function ApiTester() {
           status: 400,
           statusText: 'Bad Request',
           body: { error: 'Invalid JSON in request body' },
+        });
+        setIsLoading(false);
+        return;
+      }
+
+      // Validate URLs before sending
+      const imageUrl = parsedBody.imageUrl || parsedBody.image_url || (parsedBody.images?.[0]);
+      const audioUrl = parsedBody.audioUrl || parsedBody.audio_url || parsedBody.audio;
+
+      if (!isValidHttpsUrl(imageUrl)) {
+        setResponse({
+          status: 400,
+          statusText: 'Bad Request',
+          body: { error: 'يجب إدخال رابط صورة حقيقي من Storage (يبدأ بـ https). استخدم "Upload Files" لرفع الملفات أولاً.' },
+        });
+        setIsLoading(false);
+        return;
+      }
+
+      if (!isValidHttpsUrl(audioUrl)) {
+        setResponse({
+          status: 400,
+          statusText: 'Bad Request',
+          body: { error: 'يجب إدخال رابط صوت حقيقي من Storage (يبدأ بـ https). استخدم "Upload Files" لرفع الملفات أولاً.' },
         });
         setIsLoading(false);
         return;
