@@ -8,3 +8,12 @@ verify_jwt = false
 
 [functions.test-publish]
 verify_jwt = false
+
+[functions.job-status]
+verify_jwt = false
+
+[functions.cancel-job]
+verify_jwt = false
+
+[functions.merge-media]
+verify_jwt = false
