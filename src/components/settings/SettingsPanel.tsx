@@ -5,6 +5,7 @@ import { OAuthSettings } from './OAuthSettings';
 import { ApiKeysSettings } from './ApiKeysSettings';
 import { ApiTester } from './ApiTester';
 import { EdgeFunctionDebug } from './EdgeFunctionDebug';
+import { PublishTester } from './PublishTester';
 import { Settings } from 'lucide-react';
 
 export function SettingsPanel() {
@@ -24,6 +25,7 @@ export function SettingsPanel() {
       <OAuthSettings />
       <ApiKeysSettings />
       <ApiTester />
+      <PublishTester />
       <EdgeFunctionDebug />
     </div>
   );

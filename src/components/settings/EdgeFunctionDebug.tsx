@@ -49,7 +49,8 @@ export function EdgeFunctionDebug() {
           break;
         case 'test-publish':
           result = await supabase.functions.invoke('test-publish', {
-            body: { platform: 'youtube', type: 'text', content: 'Health check' },
+            // Facebook text post is the simplest end-to-end publish test (no image required)
+            body: { platform: 'facebook', type: 'text', content: 'اختبار نشر - Facebook' },
           });
           break;
         case 'ai-generate':
@@ -64,6 +65,24 @@ export function EdgeFunctionDebug() {
       const latency = Date.now() - startTime;
       const success = result instanceof Response ? result.ok : !result.error;
 
+      const status =
+        result instanceof Response
+          ? result.status
+          : result.error
+            ? ((result.error as unknown as { context?: { status?: number } }).context?.status ?? 500)
+            : 200;
+
+      const responsePayload =
+        result instanceof Response
+          ? await result.json().catch(() => ({}))
+          : result.error
+            ? {
+                name: result.error.name,
+                message: result.error.message,
+                context: (result.error as unknown as { context?: unknown }).context,
+              }
+            : result.data;
+
       setTestResults(prev => ({
         ...prev,
         [funcName]: { success, message: success ? 'OK' : 'Failed', latency },
@@ -74,9 +93,9 @@ export function EdgeFunctionDebug() {
         function_name: funcName,
         timestamp: new Date().toISOString(),
         method: 'POST',
-        status: success ? 200 : 500,
+        status,
         duration_ms: latency,
-        response: result instanceof Response ? await result.json().catch(() => ({})) : result.data || result.error,
+        response: responsePayload,
       };
 
       setLogs(prev => [newLog, ...prev.slice(0, 49)]);
