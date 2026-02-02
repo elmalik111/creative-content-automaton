@@ -14,6 +14,36 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_content: {
+        Row: {
+          content: Json
+          created_at: string | null
+          id: string
+          prompt: string
+          status: string
+          type: string
+          user_id: string
+        }
+        Insert: {
+          content: Json
+          created_at?: string | null
+          id?: string
+          prompt: string
+          status?: string
+          type: string
+          user_id: string
+        }
+        Update: {
+          content?: Json
+          created_at?: string | null
+          id?: string
+          prompt?: string
+          status?: string
+          type?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       api_keys: {
         Row: {
           created_at: string
@@ -44,6 +74,45 @@ export type Database = {
         }
         Relationships: []
       }
+      connections: {
+        Row: {
+          access_token: string
+          created_at: string | null
+          expires_at: string | null
+          id: string
+          platform: string
+          platform_account_id: string | null
+          platform_account_name: string | null
+          refresh_token: string | null
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          access_token: string
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          platform: string
+          platform_account_id?: string | null
+          platform_account_name?: string | null
+          refresh_token?: string | null
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          access_token?: string
+          created_at?: string | null
+          expires_at?: string | null
+          id?: string
+          platform?: string
+          platform_account_id?: string | null
+          platform_account_name?: string | null
+          refresh_token?: string | null
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
       elevenlabs_keys: {
         Row: {
           api_key: string
@@ -71,6 +140,36 @@ export type Database = {
           last_used_at?: string | null
           name?: string
           usage_count?: number
+        }
+        Relationships: []
+      }
+      ideas: {
+        Row: {
+          created_at: string | null
+          description: string | null
+          id: string
+          status: string
+          title: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          status?: string
+          title: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string | null
+          description?: string | null
+          id?: string
+          status?: string
+          title?: string
+          updated_at?: string | null
+          user_id?: string
         }
         Relationships: []
       }
@@ -199,6 +298,72 @@ export type Database = {
           refresh_token?: string | null
           scope?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      posts: {
+        Row: {
+          content: string
+          created_at: string | null
+          id: string
+          media_urls: string[] | null
+          platform_post_ids: Json | null
+          platform_targets: string[]
+          scheduled_at: string | null
+          status: string
+          updated_at: string | null
+          user_id: string
+        }
+        Insert: {
+          content: string
+          created_at?: string | null
+          id?: string
+          media_urls?: string[] | null
+          platform_post_ids?: Json | null
+          platform_targets: string[]
+          scheduled_at?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id: string
+        }
+        Update: {
+          content?: string
+          created_at?: string | null
+          id?: string
+          media_urls?: string[] | null
+          platform_post_ids?: Json | null
+          platform_targets?: string[]
+          scheduled_at?: string | null
+          status?: string
+          updated_at?: string | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          avatar_url: string | null
+          created_at: string | null
+          email: string
+          full_name: string | null
+          id: string
+          updated_at: string | null
+        }
+        Insert: {
+          avatar_url?: string | null
+          created_at?: string | null
+          email: string
+          full_name?: string | null
+          id: string
+          updated_at?: string | null
+        }
+        Update: {
+          avatar_url?: string | null
+          created_at?: string | null
+          email?: string
+          full_name?: string | null
+          id?: string
+          updated_at?: string | null
         }
         Relationships: []
       }
