@@ -5,8 +5,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { useSetting, useUpdateSetting } from '@/hooks/useSettings';
 import { supabase } from '@/integrations/supabase/client';
-import { Bot, Save, Loader2, Eye, EyeOff, CheckCircle2, XCircle, Copy } from 'lucide-react';
+import { Bot, Save, Loader2, Eye, EyeOff, CheckCircle2, XCircle, Copy, Webhook, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 
 export function TelegramSettings() {
   const { data: telegramToken, isLoading } = useSetting('telegram_token');
@@ -14,6 +15,12 @@ export function TelegramSettings() {
   const [token, setToken] = useState('');
   const [showToken, setShowToken] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [isRegisteringWebhook, setIsRegisteringWebhook] = useState(false);
+  const [webhookStatus, setWebhookStatus] = useState<{
+    registered: boolean;
+    url?: string;
+    error?: string;
+  } | null>(null);
   const [botInfo, setBotInfo] = useState<{
     valid: boolean;
     name?: string;
@@ -79,6 +86,70 @@ export function TelegramSettings() {
     navigator.clipboard.writeText(webhookUrl);
     toast.success('Webhook URL copied!');
   };
+
+  const handleRegisterWebhook = async () => {
+    if (!token) {
+      toast.error('Please save a bot token first');
+      return;
+    }
+
+    setIsRegisteringWebhook(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-tokens', {
+        body: { platform: 'telegram', action: 'register_webhook' },
+      });
+
+      if (error) throw error;
+
+      if (data.webhook_registered) {
+        setWebhookStatus({
+          registered: true,
+          url: data.webhook_url,
+        });
+        toast.success('Webhook registered successfully! Your bot is now ready to receive commands.');
+      } else {
+        setWebhookStatus({
+          registered: false,
+          error: data.error || 'Failed to register webhook',
+        });
+        toast.error(data.error || 'Failed to register webhook');
+      }
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setWebhookStatus({ registered: false, error: error.message });
+      toast.error(error.message);
+    } finally {
+      setIsRegisteringWebhook(false);
+    }
+  };
+
+  const handleCheckWebhook = async () => {
+    if (!token) return;
+
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-tokens', {
+        body: { platform: 'telegram', action: 'check_webhook' },
+      });
+
+      if (error) throw error;
+
+      if (data.webhook_info) {
+        setWebhookStatus({
+          registered: !!data.webhook_info.url,
+          url: data.webhook_info.url,
+        });
+      }
+    } catch {
+      // Silently fail for check
+    }
+  };
+
+  // Check webhook status on load
+  useEffect(() => {
+    if (telegramToken) {
+      handleCheckWebhook();
+    }
+  }, [telegramToken]);
 
   const maskedToken = token ? `${token.slice(0, 8)}${'•'.repeat(Math.max(0, token.length - 12))}${token.slice(-4)}` : '';
 
@@ -155,9 +226,54 @@ export function TelegramSettings() {
           </div>
         )}
 
-        {/* Webhook URL */}
+        {/* Webhook Status & Registration */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <label className="text-sm font-medium text-muted-foreground">Webhook Status</label>
+            {webhookStatus && (
+              <Badge variant={webhookStatus.registered ? "default" : "secondary"}>
+                {webhookStatus.registered ? "Registered" : "Not Registered"}
+              </Badge>
+            )}
+          </div>
+
+          {webhookStatus?.registered && webhookStatus.url && (
+            <div className="p-3 rounded-lg border bg-primary/5 border-primary/20">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-primary" />
+                <span className="text-sm">Webhook is active and receiving messages</span>
+              </div>
+              <p className="text-xs text-muted-foreground mt-1 font-mono">{webhookStatus.url}</p>
+            </div>
+          )}
+
+          {webhookStatus && !webhookStatus.registered && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                {webhookStatus.error || "Webhook is not registered. Click the button below to register."}
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <Button
+            onClick={handleRegisterWebhook}
+            disabled={isRegisteringWebhook || !token}
+            className="w-full"
+            variant={webhookStatus?.registered ? "outline" : "default"}
+          >
+            {isRegisteringWebhook ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : (
+              <Webhook className="h-4 w-4 mr-2" />
+            )}
+            {webhookStatus?.registered ? "Re-register Webhook" : "Register Webhook"}
+          </Button>
+        </div>
+
+        {/* Webhook URL (for reference) */}
         <div className="space-y-2">
-          <label className="text-sm font-medium text-muted-foreground">Webhook URL</label>
+          <label className="text-sm font-medium text-muted-foreground">Webhook URL (for reference)</label>
           <div className="flex gap-2">
             <Input
               value={webhookUrl}
@@ -168,9 +284,6 @@ export function TelegramSettings() {
               <Copy className="h-4 w-4" />
             </Button>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Set this URL as your bot's webhook in Telegram Bot API
-          </p>
         </div>
       </CardContent>
     </Card>

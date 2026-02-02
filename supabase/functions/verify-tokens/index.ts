@@ -8,6 +8,7 @@ const YOUTUBE_CLIENT_SECRET = Deno.env.get("YOUTUBE_CLIENT_SECRET");
 interface VerifyRequest {
   platform: "youtube" | "instagram" | "facebook" | "telegram" | "elevenlabs";
   token?: string; // For ElevenLabs specific key verification
+  action?: "verify" | "register_webhook" | "check_webhook"; // For Telegram actions
 }
 
 // ===== AUTH HELPER: Require any authenticated user =====
@@ -56,7 +57,7 @@ serve(async (req) => {
     }
 
     const body: VerifyRequest = await req.json();
-    const { platform, token } = body;
+    const { platform, token, action } = body;
 
     switch (platform) {
       case "youtube":
@@ -66,7 +67,7 @@ serve(async (req) => {
       case "facebook":
         return await verifyFacebook();
       case "telegram":
-        return await verifyTelegram();
+        return await verifyTelegram(action);
       case "elevenlabs":
         return await verifyElevenLabs(token);
       default:
@@ -423,7 +424,7 @@ async function verifyFacebook(): Promise<Response> {
   }
 }
 
-async function verifyTelegram(): Promise<Response> {
+async function verifyTelegram(action?: string): Promise<Response> {
   const { data: tokenSetting } = await supabase
     .from("settings")
     .select("value")
@@ -437,9 +438,98 @@ async function verifyTelegram(): Promise<Response> {
     );
   }
 
-  // Verify by calling getMe
+  const botToken = tokenSetting.value;
+
+  // Handle webhook registration
+  if (action === "register_webhook") {
+    const webhookSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    
+    if (!webhookSecret) {
+      return new Response(
+        JSON.stringify({ 
+          valid: false, 
+          error: "TELEGRAM_WEBHOOK_SECRET not configured in Supabase Secrets",
+          webhook_registered: false 
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const webhookUrl = `${supabaseUrl}/functions/v1/telegram-webhook`;
+    
+    const setWebhookResponse = await fetch(
+      `https://api.telegram.org/bot${botToken}/setWebhook`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: webhookSecret,
+        }),
+      }
+    );
+
+    const setWebhookData = await setWebhookResponse.json();
+
+    if (!setWebhookData.ok) {
+      return new Response(
+        JSON.stringify({ 
+          valid: false, 
+          error: setWebhookData.description || "Failed to register webhook",
+          webhook_registered: false 
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        valid: true,
+        webhook_registered: true,
+        webhook_url: webhookUrl,
+        message: "Webhook registered successfully",
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+
+  // Handle webhook status check
+  if (action === "check_webhook") {
+    const webhookInfoResponse = await fetch(
+      `https://api.telegram.org/bot${botToken}/getWebhookInfo`
+    );
+
+    const webhookInfoData = await webhookInfoResponse.json();
+
+    if (!webhookInfoData.ok) {
+      return new Response(
+        JSON.stringify({ 
+          valid: false, 
+          error: webhookInfoData.description || "Failed to get webhook info" 
+        }),
+        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        valid: true,
+        webhook_info: {
+          url: webhookInfoData.result.url,
+          has_custom_certificate: webhookInfoData.result.has_custom_certificate,
+          pending_update_count: webhookInfoData.result.pending_update_count,
+          last_error_date: webhookInfoData.result.last_error_date,
+          last_error_message: webhookInfoData.result.last_error_message,
+        },
+      }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    );
+  }
+
+  // Default: Verify bot token
   const botResponse = await fetch(
-    `https://api.telegram.org/bot${tokenSetting.value}/getMe`
+    `https://api.telegram.org/bot${botToken}/getMe`
   );
 
   const botData = await botResponse.json();
