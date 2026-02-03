@@ -215,8 +215,14 @@ async function processAIGeneration(
       output_format: "mp4",
     });
 
+    console.log("Merge result:", JSON.stringify(mergeResult));
+
     if (mergeResult.status === "failed") {
       throw new Error(mergeResult.error || "Video merge failed");
+    }
+
+    if (!mergeResult.output_url) {
+      throw new Error("Merge completed but no output URL returned");
     }
 
     await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeResult.output_url });

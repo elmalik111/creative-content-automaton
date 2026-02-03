@@ -81,7 +81,82 @@ export async function mergeMediaWithFFmpeg(
     throw new Error(`FFmpeg Space error: ${error}`);
   }
 
-  return response.json();
+  const result: MergeMediaResponse = await response.json();
+  
+  // If the merge is still processing, poll for completion
+  if (result.status === "processing" && result.output_url) {
+    // If we have a job ID or output URL, poll for completion
+    return await pollForMergeCompletion(result);
+  }
+  
+  // If immediately completed or failed
+  if (result.status === "completed" || result.status === "failed") {
+    return result;
+  }
+
+  // For async jobs, poll using the job URL or output_url
+  console.log("Merge started, polling for completion...");
+  return await pollForMergeCompletion(result);
+}
+
+async function pollForMergeCompletion(
+  initialResult: MergeMediaResponse,
+  maxAttempts = 60, // 5 minutes max (5 seconds * 60)
+  pollInterval = 5000
+): Promise<MergeMediaResponse> {
+  let attempts = 0;
+  let result = initialResult;
+  
+  // If we have a job_id field, use it for polling
+  const jobId = (result as unknown as { job_id?: string }).job_id;
+  
+  while (result.status === "processing" && attempts < maxAttempts) {
+    attempts++;
+    console.log(`Polling merge status... attempt ${attempts}/${maxAttempts}`);
+    
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    
+    try {
+      // If we have a job_id, use status endpoint
+      if (jobId) {
+        const statusResponse = await fetch(`${HF_SPACE_URL}/status/${jobId}`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${HF_READ_TOKEN}`,
+          },
+        });
+        
+        if (statusResponse.ok) {
+          result = await statusResponse.json();
+        }
+      } else if (result.output_url) {
+        // Try to check if the output URL is accessible
+        const checkResponse = await fetch(result.output_url, { method: "HEAD" });
+        if (checkResponse.ok) {
+          result = {
+            ...result,
+            status: "completed",
+          };
+        }
+      } else {
+        // No way to poll, assume completed if we got a response
+        console.log("No job_id or output_url for polling, returning initial result");
+        break;
+      }
+    } catch (pollError) {
+      console.error(`Poll attempt ${attempts} failed:`, pollError);
+    }
+  }
+  
+  if (attempts >= maxAttempts && result.status === "processing") {
+    return {
+      status: "failed",
+      progress: result.progress,
+      error: "Merge timeout: Operation took too long",
+    };
+  }
+  
+  return result;
 }
 
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
