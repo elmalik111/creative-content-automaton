@@ -3,9 +3,9 @@ const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://ff.hf.space";
 
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  // Using the Hugging Face Inference API with FLUX.1-schnell
+  // Using the Hugging Face Router API with FLUX.1-schnell (updated endpoint)
   const response = await fetch(
-    "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
     {
       method: "POST",
       headers: {
