@@ -33,6 +33,8 @@ export async function getNextElevenLabsKey(): Promise<{ key: string; keyId: stri
     })
     .eq("id", selectedKey.id);
 
+  console.log(`Using ElevenLabs key: ${selectedKey.name} (usage: ${selectedKey.usage_count + 1})`);
+
   return {
     key: selectedKey.api_key,
     keyId: selectedKey.id,
@@ -49,8 +51,11 @@ export async function generateSpeech(
     throw new Error("No active ElevenLabs API keys available");
   }
 
+  console.log(`Generating speech with voice ${voiceId}, text length: ${text.length}`);
+
+  // IMPORTANT: output_format must be passed as query parameter, NOT in request body
   const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
     {
       method: "POST",
       headers: {
@@ -63,15 +68,21 @@ export async function generateSpeech(
         voice_settings: {
           stability: 0.5,
           similarity_boost: 0.75,
+          style: 0.5,
+          use_speaker_boost: true,
         },
       }),
     }
   );
 
   if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`ElevenLabs API error: ${error}`);
+    const errorText = await response.text();
+    console.error("ElevenLabs error:", response.status, errorText);
+    throw new Error(`ElevenLabs API error: ${response.status} - ${errorText}`);
   }
 
-  return response.arrayBuffer();
+  const audioBuffer = await response.arrayBuffer();
+  console.log("Voice generated successfully, size:", audioBuffer.byteLength);
+
+  return audioBuffer;
 }
