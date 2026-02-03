@@ -1,16 +1,47 @@
-const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")!;
-
-interface GeminiResponse {
-  candidates: Array<{
-    content: {
-      parts: Array<{
-        text: string;
-      }>;
-    };
-  }>;
-}
+const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 
 export async function generateWithGemini(prompt: string): Promise<string> {
+  // Try Lovable AI Gateway first (recommended), fallback to direct Gemini API
+  if (LOVABLE_API_KEY) {
+    return generateWithLovableGateway(prompt);
+  } else if (GEMINI_API_KEY) {
+    return generateWithDirectGemini(prompt);
+  } else {
+    throw new Error("No AI API key configured (LOVABLE_API_KEY or GEMINI_API_KEY required)");
+  }
+}
+
+async function generateWithLovableGateway(prompt: string): Promise<string> {
+  console.log("Using Lovable AI Gateway with gemini-3-flash-preview");
+  
+  const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${LOVABLE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "google/gemini-3-flash-preview",
+      messages: [
+        { role: "user", content: prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    console.error("Lovable AI Gateway error:", response.status, error);
+    throw new Error(`Lovable AI Gateway error: ${error}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || "";
+}
+
+async function generateWithDirectGemini(prompt: string): Promise<string> {
+  console.log("Using direct Gemini API with gemini-2.5-flash");
+  
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
     {
@@ -30,7 +61,7 @@ export async function generateWithGemini(prompt: string): Promise<string> {
         ],
         generationConfig: {
           temperature: 0.7,
-          maxOutputTokens: 2048,
+          maxOutputTokens: 4096,
         },
       }),
     }
@@ -38,7 +69,18 @@ export async function generateWithGemini(prompt: string): Promise<string> {
 
   if (!response.ok) {
     const error = await response.text();
+    console.error("Gemini API error:", response.status, error);
     throw new Error(`Gemini API error: ${error}`);
+  }
+
+  interface GeminiResponse {
+    candidates: Array<{
+      content: {
+        parts: Array<{
+          text: string;
+        }>;
+      };
+    }>;
   }
 
   const data: GeminiResponse = await response.json();
