@@ -9,6 +9,7 @@ import JobDetails from "./pages/JobDetails";
 import AuthCallback from "./pages/AuthCallback";
 import Login from "./pages/Login";
 import NotFound from "./pages/NotFound";
+import SettingsPage from "./pages/Settings";
 
 const queryClient = new QueryClient();
 
@@ -34,6 +35,14 @@ const App = () => (
             element={
               <ProtectedRoute>
                 <JobDetails />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                <SettingsPage />
               </ProtectedRoute>
             }
           />
