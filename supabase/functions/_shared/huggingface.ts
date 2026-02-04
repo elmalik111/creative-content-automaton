@@ -83,9 +83,19 @@ export async function mergeMediaWithFFmpeg(
     throw new Error(`FFmpeg Space error: ${error}`);
   }
 
-  const result: MergeMediaResponse = await response.json();
+  const rawResult = await response.json();
   
-  console.log("FFmpeg Space initial response:", JSON.stringify(result));
+  console.log("FFmpeg Space initial response:", JSON.stringify(rawResult));
+  
+  // Normalize the response - FFmpeg Space returns jobId (camelCase)
+  const result: MergeMediaResponse = {
+    status: rawResult.status || "processing",
+    progress: rawResult.progress ?? 0,
+    output_url: rawResult.output_url || rawResult.outputUrl,
+    error: rawResult.error,
+    job_id: rawResult.job_id || rawResult.jobId, // Support both naming conventions
+    message: rawResult.message,
+  };
   
   // If the merge returns a job_id, we need to poll for completion
   if (result.job_id && result.status === "processing") {
