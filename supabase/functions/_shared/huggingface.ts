@@ -2,6 +2,41 @@ const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 // Use ff.hf.space as the primary merge endpoint
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://ff.hf.space";
 
+function normalizeMaybeUrl(raw?: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim();
+  if (!v) return undefined;
+
+  // Some providers return relative paths like "/file=...".
+  try {
+    return new URL(v, HF_SPACE_URL).toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function extractJobId(raw: any): string | undefined {
+  const v = raw?.job_id ?? raw?.jobId ?? raw?.id;
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+function extractOutputUrl(raw: any): string | undefined {
+  const v =
+    raw?.output_url ??
+    raw?.outputUrl ??
+    raw?.url ??
+    raw?.video_url ??
+    raw?.videoUrl ??
+    raw?.result?.output_url ??
+    raw?.result?.outputUrl ??
+    raw?.result?.url ??
+    raw?.data?.output_url ??
+    raw?.data?.outputUrl ??
+    raw?.data?.url;
+
+  return normalizeMaybeUrl(v);
+}
+
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
   // Using the Hugging Face Router API with FLUX.1-schnell (updated endpoint)
   const response = await fetch(
@@ -91,9 +126,9 @@ export async function mergeMediaWithFFmpeg(
   const result: MergeMediaResponse = {
     status: rawResult.status || "processing",
     progress: rawResult.progress ?? 0,
-    output_url: rawResult.output_url || rawResult.outputUrl,
+    output_url: extractOutputUrl(rawResult),
     error: rawResult.error,
-    job_id: rawResult.job_id || rawResult.jobId, // Support both naming conventions
+    job_id: extractJobId(rawResult), // Support both naming conventions
     message: rawResult.message,
   };
   
@@ -150,17 +185,19 @@ async function pollForMergeCompletion(
       if (statusResponse.ok) {
         const statusResult = await statusResponse.json();
         console.log(`Poll ${attempts} response:`, JSON.stringify(statusResult));
+
+        const polledOutputUrl = extractOutputUrl(statusResult);
         
         // Update result with the polled data
         result = {
           ...result,
           status: statusResult.status || result.status,
           progress: statusResult.progress ?? result.progress,
-          output_url: statusResult.output_url || statusResult.outputUrl || result.output_url,
+          output_url: polledOutputUrl || result.output_url,
           error: statusResult.error || result.error,
         };
         
-        // If we got an output_url and status is still processing, mark as completed
+        // If we got an output_url, consider it completed.
         if (result.output_url && result.output_url.startsWith("http")) {
           result.status = "completed";
           console.log(`Merge completed with output URL: ${result.output_url}`);
@@ -198,5 +235,13 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
     throw new Error(`Status check error: ${error}`);
   }
 
-  return response.json();
+  const raw = await response.json();
+  return {
+    status: raw.status || "processing",
+    progress: raw.progress ?? 0,
+    output_url: extractOutputUrl(raw),
+    error: raw.error,
+    job_id: extractJobId(raw),
+    message: raw.message,
+  };
 }

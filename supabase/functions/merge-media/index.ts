@@ -475,6 +475,47 @@ async function processMediaMerge(
       throw new Error(result.error || "Merge failed");
     }
 
+    if (!result.output_url) {
+      throw new Error(
+        "اكتملت عملية الدمج من مزود الخدمة لكن لم يتم إرجاع رابط إخراج للفيديو (output_url)."
+      );
+    }
+
+    const providerOutputUrl = result.output_url;
+    let finalOutputUrl = providerOutputUrl;
+
+    // Upload final video to our own storage to get a stable URL
+    try {
+      const videoResponse = await fetch(providerOutputUrl);
+      if (!videoResponse.ok) {
+        throw new Error(`Failed to download merged video (HTTP ${videoResponse.status})`);
+      }
+      const videoBuffer = await videoResponse.arrayBuffer();
+
+      const finalVideoName = `${jobId}/merged_video.mp4`;
+      const { error: videoUploadError } = await supabase.storage
+        .from("media-output")
+        .upload(finalVideoName, videoBuffer, {
+          contentType: "video/mp4",
+          upsert: true,
+        });
+
+      if (videoUploadError) {
+        throw new Error(`Final video upload failed: ${videoUploadError.message}`);
+      }
+
+      const { data: finalVideoUrlData } = supabase.storage
+        .from("media-output")
+        .getPublicUrl(finalVideoName);
+
+      if (finalVideoUrlData?.publicUrl) {
+        finalOutputUrl = finalVideoUrlData.publicUrl;
+      }
+    } catch (uploadErr) {
+      // Fallback: keep provider URL (still better than null)
+      console.error("Final video storage upload failed, falling back to provider URL:", uploadErr);
+    }
+
     const mergeDuration = Date.now() - mergeStartTime;
 
     if (steps.mergeStepId) {
@@ -483,7 +524,8 @@ async function processMediaMerge(
           provider: "huggingface-space",
           stage: "merge_complete",
           duration_seconds: Math.round(mergeDuration / 1000),
-          output_url: result.output_url,
+          provider_output_url: providerOutputUrl,
+          output_url: finalOutputUrl,
         },
       });
     }
@@ -500,14 +542,15 @@ async function processMediaMerge(
       .update({
         status: "completed",
         progress: 100,
-        output_url: result.output_url,
+        output_url: finalOutputUrl,
       })
       .eq("id", jobId);
 
     if (steps.finalizeStepId) {
       await updateJobStep(steps.finalizeStepId, "completed", {
         outputData: { 
-          output_url: result.output_url,
+          provider_output_url: providerOutputUrl,
+          output_url: finalOutputUrl,
           stage: "complete",
           total_duration_seconds: Math.round((Date.now() - mergeStartTime) / 1000),
         },
@@ -522,7 +565,7 @@ async function processMediaMerge(
         body: JSON.stringify({
           job_id: jobId,
           status: "completed",
-          output_url: result.output_url,
+          output_url: finalOutputUrl,
         }),
       });
     }

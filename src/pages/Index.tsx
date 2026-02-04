@@ -1,7 +1,9 @@
 import { StatsCards } from '@/components/dashboard/StatsCards';
 import { JobsList } from '@/components/dashboard/JobsList';
 import { SettingsPanel } from '@/components/settings/SettingsPanel';
-import { Film } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Film, Settings } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 const Index = () => {
   return (
@@ -22,6 +24,13 @@ const Index = () => {
               </p>
             </div>
           </div>
+
+           <Button asChild variant="outline">
+             <Link to="/settings">
+               <Settings className="h-4 w-4 mr-2" />
+               الإعدادات
+             </Link>
+           </Button>
         </div>
 
         {/* Stats */}
