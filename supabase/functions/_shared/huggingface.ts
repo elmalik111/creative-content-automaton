@@ -42,6 +42,8 @@ export interface MergeMediaResponse {
   progress: number;
   output_url?: string;
   error?: string;
+  job_id?: string;
+  message?: string;
 }
 
 export async function mergeMediaWithFFmpeg(
@@ -83,9 +85,11 @@ export async function mergeMediaWithFFmpeg(
 
   const result: MergeMediaResponse = await response.json();
   
-  // If the merge is still processing, poll for completion
-  if (result.status === "processing" && result.output_url) {
-    // If we have a job ID or output URL, poll for completion
+  console.log("FFmpeg Space initial response:", JSON.stringify(result));
+  
+  // If the merge returns a job_id, we need to poll for completion
+  if (result.job_id && result.status === "processing") {
+    console.log(`Merge job started with ID: ${result.job_id}, polling for completion...`);
     return await pollForMergeCompletion(result);
   }
   
@@ -94,9 +98,13 @@ export async function mergeMediaWithFFmpeg(
     return result;
   }
 
-  // For async jobs, poll using the job URL or output_url
-  console.log("Merge started, polling for completion...");
-  return await pollForMergeCompletion(result);
+  // For async jobs without job_id, try to poll using output_url
+  if (result.status === "processing") {
+    console.log("Merge started without job_id, polling for completion...");
+    return await pollForMergeCompletion(result);
+  }
+  
+  return result;
 }
 
 async function pollForMergeCompletion(
@@ -107,41 +115,49 @@ async function pollForMergeCompletion(
   let attempts = 0;
   let result = initialResult;
   
-  // If we have a job_id field, use it for polling
-  const jobId = (result as unknown as { job_id?: string }).job_id;
+  // Get the job_id from the initial result
+  const jobId = result.job_id;
+  
+  if (!jobId) {
+    console.log("No job_id available for polling");
+    return result;
+  }
   
   while (result.status === "processing" && attempts < maxAttempts) {
     attempts++;
-    console.log(`Polling merge status... attempt ${attempts}/${maxAttempts}`);
+    console.log(`Polling merge status for job ${jobId}... attempt ${attempts}/${maxAttempts}`);
     
     await new Promise(resolve => setTimeout(resolve, pollInterval));
     
     try {
-      // If we have a job_id, use status endpoint
-      if (jobId) {
-        const statusResponse = await fetch(`${HF_SPACE_URL}/status/${jobId}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${HF_READ_TOKEN}`,
-          },
-        });
+      const statusResponse = await fetch(`${HF_SPACE_URL}/status/${jobId}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${HF_READ_TOKEN}`,
+        },
+      });
+      
+      if (statusResponse.ok) {
+        const statusResult = await statusResponse.json();
+        console.log(`Poll ${attempts} response:`, JSON.stringify(statusResult));
         
-        if (statusResponse.ok) {
-          result = await statusResponse.json();
-        }
-      } else if (result.output_url) {
-        // Try to check if the output URL is accessible
-        const checkResponse = await fetch(result.output_url, { method: "HEAD" });
-        if (checkResponse.ok) {
-          result = {
-            ...result,
-            status: "completed",
-          };
+        // Update result with the polled data
+        result = {
+          ...result,
+          status: statusResult.status || result.status,
+          progress: statusResult.progress ?? result.progress,
+          output_url: statusResult.output_url || statusResult.outputUrl || result.output_url,
+          error: statusResult.error || result.error,
+        };
+        
+        // If we got an output_url and status is still processing, mark as completed
+        if (result.output_url && result.output_url.startsWith("http")) {
+          result.status = "completed";
+          console.log(`Merge completed with output URL: ${result.output_url}`);
         }
       } else {
-        // No way to poll, assume completed if we got a response
-        console.log("No job_id or output_url for polling, returning initial result");
-        break;
+        const errorText = await statusResponse.text();
+        console.error(`Poll ${attempts} failed with status ${statusResponse.status}: ${errorText}`);
       }
     } catch (pollError) {
       console.error(`Poll attempt ${attempts} failed:`, pollError);
