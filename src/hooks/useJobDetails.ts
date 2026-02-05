@@ -10,6 +10,17 @@ export function useJobDetails(jobId: string) {
   return useQuery({
     queryKey: ['job-details', jobId],
     queryFn: async (): Promise<JobWithSteps | null> => {
+      // "Tick" the job-status edge function so long-running provider jobs (FFmpeg merge)
+      // can be advanced reliably without depending on background serverless execution.
+      // We intentionally ignore errors here to avoid breaking the UI.
+      try {
+        await supabase.functions.invoke('job-status', {
+          body: { job_id: jobId },
+        });
+      } catch {
+        // no-op
+      }
+
       // Fetch job
       const { data: job, error: jobError } = await supabase
         .from('jobs')
