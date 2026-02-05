@@ -81,6 +81,59 @@ export interface MergeMediaResponse {
   message?: string;
 }
 
+/**
+ * Starts a merge job on the FFmpeg Space and returns the *initial* response (no polling).
+ * This is critical for serverless reliability: long polling should not happen inside a
+ * single edge-function invocation.
+ */
+export async function startMergeWithFFmpeg(
+  request: MergeMediaRequest
+): Promise<MergeMediaResponse> {
+  const imageUrl = request.images?.[0] || request.videos?.[0];
+  const audioUrl = request.audio;
+
+  if (!imageUrl || !audioUrl) {
+    throw new Error("Missing imageUrl or audioUrl");
+  }
+
+  const payload = {
+    imageUrl,
+    audioUrl,
+    images: request.images,
+    videos: request.videos,
+    audio: request.audio,
+    output_format: request.output_format || "mp4",
+  };
+
+  console.log("Sending to FFmpeg Space:", JSON.stringify(payload));
+
+  const response = await fetch(`${HF_SPACE_URL}/merge`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${HF_READ_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`FFmpeg Space error: ${error}`);
+  }
+
+  const rawResult = await response.json();
+  console.log("FFmpeg Space initial response:", JSON.stringify(rawResult));
+
+  return {
+    status: rawResult.status || "processing",
+    progress: rawResult.progress ?? 0,
+    output_url: extractOutputUrl(rawResult),
+    error: rawResult.error,
+    job_id: extractJobId(rawResult),
+    message: rawResult.message,
+  };
+}
+
 export async function mergeMediaWithFFmpeg(
   request: MergeMediaRequest
 ): Promise<MergeMediaResponse> {
@@ -175,36 +228,20 @@ async function pollForMergeCompletion(
     await new Promise(resolve => setTimeout(resolve, pollInterval));
     
     try {
-      const statusResponse = await fetch(`${HF_SPACE_URL}/status/${jobId}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${HF_READ_TOKEN}`,
-        },
-      });
-      
-      if (statusResponse.ok) {
-        const statusResult = await statusResponse.json();
-        console.log(`Poll ${attempts} response:`, JSON.stringify(statusResult));
+      const status = await checkMergeStatus(jobId);
 
-        const polledOutputUrl = extractOutputUrl(statusResult);
-        
-        // Update result with the polled data
-        result = {
-          ...result,
-          status: statusResult.status || result.status,
-          progress: statusResult.progress ?? result.progress,
-          output_url: polledOutputUrl || result.output_url,
-          error: statusResult.error || result.error,
-        };
-        
-        // If we got an output_url, consider it completed.
-        if (result.output_url && result.output_url.startsWith("http")) {
-          result.status = "completed";
-          console.log(`Merge completed with output URL: ${result.output_url}`);
-        }
-      } else {
-        const errorText = await statusResponse.text();
-        console.error(`Poll ${attempts} failed with status ${statusResponse.status}: ${errorText}`);
+      result = {
+        ...result,
+        status: status.status || result.status,
+        progress: status.progress ?? result.progress,
+        output_url: status.output_url || result.output_url,
+        error: status.error || result.error,
+      };
+
+      // If we got an output_url, consider it completed.
+      if (result.output_url && result.output_url.startsWith("http")) {
+        result.status = "completed";
+        console.log(`Merge completed with output URL: ${result.output_url}`);
       }
     } catch (pollError) {
       console.error(`Poll attempt ${attempts} failed:`, pollError);
@@ -223,25 +260,52 @@ async function pollForMergeCompletion(
 }
 
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
-  const response = await fetch(`${HF_SPACE_URL}/status/${jobId}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${HF_READ_TOKEN}`,
-    },
-  });
+  const candidates: Array<
+    | { method: "GET"; url: string }
+    | { method: "POST"; url: string; body?: Record<string, unknown> }
+  > = [
+    { method: "GET", url: `${HF_SPACE_URL}/status/${jobId}` },
+    { method: "GET", url: `${HF_SPACE_URL}/merge/status/${jobId}` },
+    { method: "GET", url: `${HF_SPACE_URL}/merge/status?jobId=${encodeURIComponent(jobId)}` },
+    { method: "GET", url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}` },
+    { method: "POST", url: `${HF_SPACE_URL}/status`, body: { jobId } },
+    { method: "POST", url: `${HF_SPACE_URL}/merge/status`, body: { jobId } },
+    { method: "POST", url: `${HF_SPACE_URL}/status/${jobId}` },
+    { method: "POST", url: `${HF_SPACE_URL}/merge/status/${jobId}` },
+  ];
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Status check error: ${error}`);
+  let lastErr: string | undefined;
+
+  for (const c of candidates) {
+    try {
+      const resp = await fetch(c.url, {
+        method: c.method,
+        headers: {
+          Authorization: `Bearer ${HF_READ_TOKEN}`,
+          ...(c.method === "POST" ? { "Content-Type": "application/json" } : {}),
+        },
+        body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
+      });
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        lastErr = `HTTP ${resp.status} from ${c.method} ${c.url}: ${text}`;
+        continue;
+      }
+
+      const raw = await resp.json();
+      return {
+        status: raw.status || "processing",
+        progress: raw.progress ?? 0,
+        output_url: extractOutputUrl(raw),
+        error: raw.error,
+        job_id: extractJobId(raw) || jobId,
+        message: raw.message,
+      };
+    } catch (e) {
+      lastErr = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  const raw = await response.json();
-  return {
-    status: raw.status || "processing",
-    progress: raw.progress ?? 0,
-    output_url: extractOutputUrl(raw),
-    error: raw.error,
-    job_id: extractJobId(raw),
-    message: raw.message,
-  };
+  throw new Error(lastErr || "Status check error: all candidates failed");
 }

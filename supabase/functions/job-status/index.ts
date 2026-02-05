@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
+import { checkMergeStatus } from "../_shared/huggingface.ts";
 
 // ===== AUTH HELPER =====
 async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
@@ -48,14 +49,28 @@ serve(async (req) => {
       );
     }
 
-    // Extract jobId from URL path: /job-status/{jobId}
+    // Extract jobId from URL path (/job-status/{jobId}) OR from body/query (invoke-friendly)
     const url = new URL(req.url);
     const pathParts = url.pathname.split("/").filter(Boolean);
-    const jobId = pathParts[pathParts.length - 1];
+    const maybeFromPath = pathParts[pathParts.length - 1];
 
-    if (!jobId || jobId === "job-status") {
+    let jobId: string | null = null;
+
+    if (maybeFromPath && maybeFromPath !== "job-status") {
+      jobId = maybeFromPath;
+    } else {
+      const fromQuery = url.searchParams.get("job_id") || url.searchParams.get("jobId");
+      if (fromQuery) jobId = fromQuery;
+      else {
+        // Try JSON body (Supabase functions.invoke)
+        const body = await req.json().catch(() => ({} as any));
+        jobId = body?.job_id || body?.jobId || null;
+      }
+    }
+
+    if (!jobId) {
       return new Response(
-        JSON.stringify({ error: "Job ID is required in URL path" }),
+        JSON.stringify({ error: "job_id is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -79,7 +94,7 @@ serve(async (req) => {
     }
 
     // Fetch job steps
-    const { data: steps, error: stepsError } = await supabase
+    let { data: steps, error: stepsError } = await supabase
       .from("job_steps")
       .select("*")
       .eq("job_id", jobId)
@@ -87,6 +102,159 @@ serve(async (req) => {
 
     if (stepsError) {
       throw new Error(`Failed to fetch job steps: ${stepsError.message}`);
+    }
+
+    // --- MERGE TICK (fix stuck merges) ---
+    // If we are currently in media_merge and we have a provider_job_id, we can advance the job
+    // by checking provider status. This makes the system resilient even if ai-generate was killed.
+    const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
+    const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
+
+    const mergeOutput = (mergeStep?.output_data || {}) as any;
+    const providerJobId: string | undefined =
+      mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
+
+    if (job.status === "processing" && providerJobId && !job.output_url) {
+      try {
+        const providerStatus = await checkMergeStatus(providerJobId);
+
+        // Persist heartbeat/progress from provider
+        if (providerStatus.status === "processing") {
+          const mapped = Math.min(
+            89,
+            Math.max(
+              job.progress || 75,
+              75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
+            )
+          );
+
+          await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
+
+          if (mergeStep?.id) {
+            await supabase
+              .from("job_steps")
+              .update({
+                output_data: {
+                  ...(mergeOutput || {}),
+                  provider: "ffmpeg-space",
+                  provider_job_id: providerJobId,
+                  provider_progress: providerStatus.progress,
+                  provider_status: providerStatus.status,
+                  stage: "processing",
+                },
+              })
+              .eq("id", mergeStep.id);
+          }
+        }
+
+        if (providerStatus.status === "failed") {
+          const msg = providerStatus.error || "FFmpeg provider merge failed";
+          if (mergeStep?.id) {
+            await supabase
+              .from("job_steps")
+              .update({ status: "failed", error_message: msg, completed_at: new Date().toISOString() })
+              .eq("id", mergeStep.id);
+          }
+
+          await supabase
+            .from("jobs")
+            .update({ status: "failed", error_message: msg })
+            .eq("id", jobId);
+        }
+
+        if (providerStatus.status === "completed") {
+          if (!providerStatus.output_url) {
+            throw new Error("Merge completed but no output URL returned");
+          }
+
+          // Download and persist to our storage (stable URL)
+          const providerOutputUrl = providerStatus.output_url;
+          const videoResp = await fetch(providerOutputUrl);
+          if (!videoResp.ok) {
+            throw new Error(`Failed to download merged video (HTTP ${videoResp.status})`);
+          }
+          const videoBuffer = await videoResp.arrayBuffer();
+
+          const finalVideoName = `${jobId}/final_video.mp4`;
+          const { error: uploadErr } = await supabase.storage
+            .from("media-output")
+            .upload(finalVideoName, videoBuffer, {
+              contentType: "video/mp4",
+              upsert: true,
+            });
+
+          if (uploadErr) {
+            throw new Error(`Final video upload failed: ${uploadErr.message}`);
+          }
+
+          const { data: publicUrlData } = supabase.storage
+            .from("media-output")
+            .getPublicUrl(finalVideoName);
+
+          const finalUrl = publicUrlData.publicUrl;
+
+          if (mergeStep?.id) {
+            await supabase
+              .from("job_steps")
+              .update({
+                status: "completed",
+                completed_at: new Date().toISOString(),
+                output_data: {
+                  ...(mergeOutput || {}),
+                  provider: "ffmpeg-space",
+                  provider_job_id: providerJobId,
+                  provider_output_url: providerOutputUrl,
+                  output_url: finalUrl,
+                  stage: "persisted",
+                },
+              })
+              .eq("id", mergeStep.id);
+          }
+
+          // Mark job as completed (publishing can be handled separately if needed)
+          await supabase
+            .from("jobs")
+            .update({ status: "completed", progress: 100, output_url: finalUrl, error_message: null })
+            .eq("id", jobId);
+
+          // If there's a publishing step, mark it completed (no-op publish here to avoid heavy work)
+          if (publishStep?.id && publishStep.status !== "completed") {
+            await supabase
+              .from("job_steps")
+              .update({
+                status: "completed",
+                started_at: publishStep.started_at || new Date().toISOString(),
+                completed_at: new Date().toISOString(),
+                output_data: { video_url: finalUrl, publish_results: {} },
+              })
+              .eq("id", publishStep.id);
+          }
+        }
+
+        // Refresh after tick so the response reflects the newest DB state
+        const refreshedJob = await supabase.from("jobs").select("*").eq("id", jobId).maybeSingle();
+        if (refreshedJob.data) {
+          // @ts-ignore
+          job.status = refreshedJob.data.status;
+          // @ts-ignore
+          job.progress = refreshedJob.data.progress;
+          // @ts-ignore
+          job.output_url = refreshedJob.data.output_url;
+          // @ts-ignore
+          job.error_message = refreshedJob.data.error_message;
+          // @ts-ignore
+          job.updated_at = refreshedJob.data.updated_at;
+        }
+
+        const refreshedSteps = await supabase
+          .from("job_steps")
+          .select("*")
+          .eq("job_id", jobId)
+          .order("step_order");
+        if (refreshedSteps.data) steps = refreshedSteps.data;
+      } catch (e) {
+        console.error("Merge tick error:", e);
+      }
     }
 
     // Build logs array from steps with timing info

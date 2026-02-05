@@ -12,28 +12,17 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import {
-  LayoutDashboard,
-  Video,
-  Bell,
-  Settings,
-  FileText,
-  PlusCircle,
-} from "lucide-react";
+import { LayoutDashboard, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { label: "لوحة التحكم", icon: LayoutDashboard, href: "/" },
-  { label: "إنشاء فيديو", icon: PlusCircle, href: "/" },
-  { label: "المهام", icon: FileText, href: "/" },
-  { label: "القوالب", icon: Video, href: "/" },
   { label: "الإعدادات", icon: Settings, href: "/settings" },
-  { label: "التوثيق", icon: Bell, href: "/" },
 ];
 
 function SidebarNav() {
   const { pathname } = useLocation();
-  const { open } = useSidebar();
+  const { open, setOpen, isMobile, setOpenMobile } = useSidebar();
 
   const isActive = (href: string) => {
     if (href === "/") return pathname === "/";
@@ -63,6 +52,7 @@ function SidebarNav() {
                 <SidebarMenuItem key={item.label}>
                   <SidebarMenuButton
                     asChild
+                    tooltip={item.label}
                     className={cn(
                       "w-full justify-start gap-3 text-sm font-medium rounded-lg transition-colors",
                       active
@@ -70,7 +60,14 @@ function SidebarNav() {
                         : "hover:bg-accent"
                     )}
                   >
-                    <Link to={item.href}>
+                    <Link
+                      to={item.href}
+                      onClick={() => {
+                        // Auto-hide after navigation (mobile = close sheet, desktop = collapse/offcanvas)
+                        if (isMobile) setOpenMobile(false);
+                        else setOpen(false);
+                      }}
+                    >
                       <Icon className="h-5 w-5 shrink-0" />
                       {open && <span>{item.label}</span>}
                     </Link>
@@ -91,7 +88,7 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ children }: DashboardLayoutProps) {
   return (
-    <SidebarProvider defaultOpen>
+    <SidebarProvider defaultOpen={false}>
       <div dir="rtl" className="flex min-h-screen w-full">
         {/* Content first so Sidebar sticks right in RTL */}
         <main className="flex-1 overflow-auto">
@@ -105,7 +102,7 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
         </main>
 
         {/* Sidebar on the right in RTL */}
-        <Sidebar side="right" collapsible="icon" className="border-l border-sidebar-border">
+        <Sidebar side="right" collapsible="offcanvas" className="border-l border-sidebar-border">
           <SidebarNav />
         </Sidebar>
       </div>
