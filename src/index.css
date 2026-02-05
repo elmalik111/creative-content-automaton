@@ -2,102 +2,110 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
-All colors MUST be HSL.
-*/
+/* VideoForge Design System — Soft purple-inspired light theme with RTL/Arabic support */
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* Core palette – light, soft purple accents */
+    --background: 240 27% 97%;       /* #f8f8fb */
+    --foreground: 240 15% 20%;       /* near-black slate */
 
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 240 15% 20%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 240 15% 20%;
 
-    --primary: 222.2 47.4% 11.2%;
-    --primary-foreground: 210 40% 98%;
+    /* Purple brand color */
+    --primary: 262 70% 55%;          /* #8b5cf6 */
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 262 40% 94%;        /* #ede9fe */
+    --secondary-foreground: 262 70% 45%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 240 9% 94%;             /* #f1f1f4 */
+    --muted-foreground: 240 5% 50%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 262 50% 93%;
+    --accent-foreground: 262 70% 45%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
-
-    --radius: 0.5rem;
-
-    --sidebar-background: 0 0% 98%;
-
-    --sidebar-foreground: 240 5.3% 26.1%;
-
-    --sidebar-primary: 240 5.9% 10%;
-
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
-  }
-
-  .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-
-    --card: 222.2 70% 8%;
-    --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-
-    --primary: 142 76% 36%;
-    --primary-foreground: 210 40% 98%;
-
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 142 76% 36%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
     --success: 142 76% 36%;
-    --success-foreground: 210 40% 98%;
+    --success-foreground: 0 0% 100%;
 
     --warning: 38 92% 50%;
-    --warning-foreground: 222.2 84% 4.9%;
+    --warning-foreground: 0 0% 100%;
 
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
+    --border: 262 15% 88%;
+    --input: 262 15% 88%;
+    --ring: 262 70% 55%;
+
+    --radius: 0.75rem;
+
+    /* Sidebar */
+    --sidebar-background: 262 50% 98%;
+    --sidebar-foreground: 262 35% 30%;
+    --sidebar-primary: 262 70% 55%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-accent: 262 40% 94%;
+    --sidebar-accent-foreground: 262 60% 35%;
+    --sidebar-border: 262 20% 90%;
+    --sidebar-ring: 262 70% 55%;
+
+    /* Chart colors */
+    --chart-1: 262 70% 55%;
+    --chart-2: 142 76% 36%;
+    --chart-3: 38 92% 50%;
+    --chart-4: 195 85% 41%;
+    --chart-5: 340 75% 55%;
+  }
+
+  /* Dark mode — keep existing if user wants quick switch later */
+  .dark {
+    --background: 240 20% 6%;
+    --foreground: 0 0% 96%;
+
+    --card: 240 18% 10%;
+    --card-foreground: 0 0% 96%;
+
+    --popover: 240 18% 10%;
+    --popover-foreground: 0 0% 96%;
+
+    --primary: 262 70% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 262 30% 20%;
+    --secondary-foreground: 262 60% 80%;
+
+    --muted: 240 15% 18%;
+    --muted-foreground: 240 5% 65%;
+
+    --accent: 262 30% 22%;
+    --accent-foreground: 262 60% 85%;
+
+    --destructive: 0 60% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 72% 40%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 38 92% 50%;
+    --warning-foreground: 0 0% 0%;
+
+    --border: 262 15% 22%;
+    --input: 262 15% 22%;
+    --ring: 262 70% 55%;
+
+    --sidebar-background: 240 20% 8%;
+    --sidebar-foreground: 262 40% 75%;
+    --sidebar-primary: 262 70% 60%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 262 30% 18%;
+    --sidebar-accent-foreground: 262 60% 85%;
+    --sidebar-border: 262 12% 18%;
+    --sidebar-ring: 262 70% 55%;
   }
 }
 
@@ -107,6 +115,42 @@ All colors MUST be HSL.
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  /* Arabic font tweak + RTL root */
+  [dir="rtl"] body,
+  body.rtl {
+    font-family:
+      "Noto Sans Arabic",
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      Roboto,
+      sans-serif;
+  }
+}
+
+@layer utilities {
+  /* Smooth card shadow */
+  .card-shadow {
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.03),
+      0 4px 10px rgba(0, 0, 0, 0.06);
+  }
+
+  /* Gradient for stats card highlight */
+  .gradient-primary {
+    background: linear-gradient(135deg, hsl(var(--primary)), hsl(var(--primary) / 0.7));
+  }
+
+  /* Hover lift */
+  .hover-lift {
+    @apply transition-transform duration-200;
+  }
+  .hover-lift:hover {
+    transform: translateY(-2px);
   }
 }
