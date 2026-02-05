@@ -1,50 +1,36 @@
-import { StatsCards } from '@/components/dashboard/StatsCards';
-import { JobsList } from '@/components/dashboard/JobsList';
-import { SettingsPanel } from '@/components/settings/SettingsPanel';
-import { Button } from '@/components/ui/button';
-import { Film, Settings } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { DashboardLayout } from "@/layouts/DashboardLayout";
+import { StatsCards } from "@/components/dashboard/StatsCards";
+import { JobsList } from "@/components/dashboard/JobsList";
+import { UsageChart } from "@/components/dashboard/UsageChart";
+import { ServerStatus } from "@/components/dashboard/ServerStatus";
 
 const Index = () => {
   return (
-    <div className="min-h-screen bg-background dark">
-      <div className="container mx-auto px-4 py-8 max-w-6xl">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-8">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-primary/10">
-              <Film className="h-8 w-8 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-foreground">
-                Video Automation Platform
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                Automated video creation and publishing
-              </p>
-            </div>
-          </div>
-
-           <Button asChild variant="outline">
-             <Link to="/settings">
-               <Settings className="h-4 w-4 mr-2" />
-               الإعدادات
-             </Link>
-           </Button>
-        </div>
-
-        {/* Stats */}
-        <div className="mb-8">
-          <StatsCards />
-        </div>
-
-        {/* Main Content */}
-        <div className="grid lg:grid-cols-2 gap-8">
-          <JobsList />
-          <SettingsPanel />
-        </div>
+    <DashboardLayout>
+      {/* Welcome header */}
+      <div className="mb-6">
+        <h1 className="text-xl font-bold">مرحباً بك في VideoForge</h1>
+        <p className="text-sm text-muted-foreground">
+          لوحة التحكم الرئيسية لإدارة إنتاج الفيديو
+        </p>
       </div>
-    </div>
+
+      {/* Stats */}
+      <section className="mb-6">
+        <StatsCards />
+      </section>
+
+      {/* Chart + Jobs */}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <UsageChart />
+        <JobsList />
+      </div>
+
+      {/* Server status */}
+      <section className="mt-6">
+        <ServerStatus />
+      </section>
+    </DashboardLayout>
   );
 };
 
