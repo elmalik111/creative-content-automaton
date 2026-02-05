@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { generateVoiceoverScript, generateImagePrompts } from "../_shared/gemini.ts";
 import { generateSpeech } from "../_shared/elevenlabs.ts";
-import { generateImageWithFlux, mergeMediaWithFFmpeg } from "../_shared/huggingface.ts";
+import { generateImageWithFlux, startMergeWithFFmpeg } from "../_shared/huggingface.ts";
 
 interface AIGenerateRequest {
   job_id: string;
@@ -209,80 +209,51 @@ async function processAIGeneration(
     // Step 4: Merge images with audio
     await updateJobStep(steps.mergeStep, "processing");
     console.log("Merging media...");
-    const mergeResult = await mergeMediaWithFFmpeg({
+    // IMPORTANT: do NOT long-poll inside ai-generate. Just start the provider job and
+    // let the UI polling (job-status) advance it.
+    const mergeStart = await startMergeWithFFmpeg({
       images: imageUrls,
       audio: audioUrlData.publicUrl,
       output_format: "mp4",
     });
 
-    console.log("Merge result:", JSON.stringify(mergeResult));
+    console.log("Merge start:", JSON.stringify(mergeStart));
 
-    if (mergeResult.status === "failed") {
-      throw new Error(mergeResult.error || "Video merge failed");
+    if (mergeStart.status === "failed") {
+      throw new Error(mergeStart.error || "Video merge failed");
     }
 
-    if (!mergeResult.output_url) {
-      throw new Error("Merge completed but no output URL returned");
-    }
-
-    await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeResult.output_url });
-    await updateJobProgress(jobId, 90);
-
-    // Step 5: Upload final video and publish
-    await updateJobStep(steps.publishStep, "processing");
-    
-    let finalVideoUrl: string | null = null;
-    
-    if (mergeResult.output_url) {
-      const videoResponse = await fetch(mergeResult.output_url);
-      const videoBuffer = await videoResponse.arrayBuffer();
-
-      const finalVideoName = `${jobId}/final_video.mp4`;
-      const { error: videoUploadError } = await supabase.storage
-        .from("media-output")
-        .upload(finalVideoName, videoBuffer, {
-          contentType: "video/mp4",
-        });
-
-      if (videoUploadError) {
-        console.error("Final video upload failed:", videoUploadError);
-      }
-
-      const { data: finalVideoUrlData } = supabase.storage
-        .from("media-output")
-        .getPublicUrl(finalVideoName);
-
-      finalVideoUrl = finalVideoUrlData.publicUrl;
-
-      // Mark job as complete
+    // If provider returned an immediate output URL, we can complete quickly.
+    if (mergeStart.output_url) {
+      await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeStart.output_url });
+      await updateJobProgress(jobId, 90);
+      // Publishing stays in the existing pipeline, but immediate outputs are rare.
+      // For now: mark job completed with the provider URL.
       await supabase
         .from("jobs")
         .update({
           status: "completed",
           progress: 100,
-          output_url: finalVideoUrl,
+          output_url: mergeStart.output_url,
         })
         .eq("id", jobId);
-
-      // Auto-publish to connected platforms
-      const publishResults = await autoPublishToConnectedPlatforms(
-        jobId,
-        finalVideoUrl,
-        inputData.title,
-        inputData.description
-      );
-
-      await updateJobStep(steps.publishStep, "completed", undefined, { 
-        video_url: finalVideoUrl,
-        publish_results: publishResults 
-      });
-
-      // Send Telegram notification
-      if (sourceUrl?.startsWith("telegram:")) {
-        const chatId = parseInt(sourceUrl.replace("telegram:", ""));
-        await sendTelegramNotification(chatId, jobId, finalVideoUrl, publishResults);
-      }
+      return;
     }
+
+    if (!mergeStart.job_id) {
+      throw new Error("FFmpeg merge started but no provider job id returned");
+    }
+
+    await updateJobStep(steps.mergeStep, "processing", undefined, {
+      provider: "ffmpeg-space",
+      provider_job_id: mergeStart.job_id,
+      stage: "queued",
+    });
+
+    // Keep job in processing; the frontend polling will call job-status which will
+    // check the provider status and finalize upload/output_url.
+    await updateJobProgress(jobId, 78);
+    return;
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
     console.error("AI Generation error:", error);
