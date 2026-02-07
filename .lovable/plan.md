@@ -1,134 +1,88 @@
 
 
-# خطة إصلاح نظام إنشاء الفيديوهات عبر Telegram
+# خطة إصلاح المشاكل الثلاث
 
-## الهدف
-تفعيل المهمة الثانية بالكامل: استلام أمر من Telegram → توليد محتوى AI → نشر على المنصات
+## المشاكل المكتشفة
 
----
-
-## التشخيص الحالي
-
-### ما يعمل بشكل صحيح
-- جميع Edge Functions موجودة ومكتوبة بشكل صحيح
-- Gemini API مُعد ومفتاحه موجود
-- Hugging Face token موجود
-- ElevenLabs مفتاح واحد نشط في قاعدة البيانات
-- Storage buckets موجودة (temp-files, media-output)
-- توكن Telegram محفوظ في جدول settings
-
-### ما لا يعمل ولماذا
-1. **Webhook غير مسجل مع Telegram** - لم يتم إرسال أي طلبات للنظام
-2. **TELEGRAM_WEBHOOK_SECRET غير موجود** في Supabase Secrets
-3. **YouTube token منتهي الصلاحية** (انتهى منذ ساعات)
-
----
-
-## الخطوة 1: إضافة TELEGRAM_WEBHOOK_SECRET
-
-إضافة Secret جديد في Supabase:
-- الاسم: `TELEGRAM_WEBHOOK_SECRET`
-- القيمة: كلمة سر عشوائية (32 حرف على الأقل)
-
----
-
-## الخطوة 2: تسجيل Webhook مع Telegram
-
-بعد إضافة الـ Secret، يجب تنفيذ هذا الأمر (استبدل القيم):
-
-```text
-POST https://api.telegram.org/bot<BOT_TOKEN>/setWebhook
-
-{
-  "url": "https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/telegram-webhook",
-  "secret_token": "<TELEGRAM_WEBHOOK_SECRET>"
-}
+### 1. مشكلة الدمج: سيرفر FFmpeg Space معطل تماما
+السبب الجذري: الرابط `https://ff.hf.space` يرجع **404 - Page Not Found**. السيرفر غير موجود او متوقف. كل محاولات التحقق من حالة الدمج تفشل بنفس الخطأ:
 ```
-
-البوت توكن الحالي: `6086731822:AAFEOi5qL_Ts-gsCj8C_JZ1lnLYb_expaio`
-
----
-
-## الخطوة 3: إعادة اتصال YouTube
-
-توكن YouTube الحالي منتهي الصلاحية. يجب:
-1. الذهاب للداشبورد → Settings → OAuth
-2. إعادة ربط YouTube للحصول على توكن جديد
-
----
-
-## الخطوة 4: اختبار النظام
-
-بعد الإعداد:
-1. إرسال `/start` للبوت → يجب أن يرد برسالة ترحيب
-2. إرسال `/create` مع البيانات → يجب أن يبدأ بإنشاء الفيديو
-
----
-
-## القسم التقني
-
-### تدفق البيانات الكامل
-
-```text
-المستخدم يرسل /create
-        ↓
-telegram-webhook يستلم الطلب
-        ↓
-    يتحقق من X-Telegram-Bot-Api-Secret-Token
-        ↓
-    يحلل البيانات (عنوان، وصف، نوع صوت، عدد مشاهد، مدة)
-        ↓
-    ينشئ job في قاعدة البيانات (type: ai_generate)
-        ↓
-    يطلق ai-generate function
-        ↓
-ai-generate يبدأ العمل:
-    ├── Step 1: Gemini يولد سكربت التعليق الصوتي بالعربية
-    ├── Step 2: ElevenLabs يحول النص لصوت
-    ├── Step 3: Gemini يولد وصف الصور بالإنجليزية
-    ├── Step 4: Flux يولد الصور
-    ├── Step 5: FFmpeg يدمج الصور مع الصوت
-    └── Step 6: publish-video ينشر على المنصات المتصلة
-        ↓
-    يرسل إشعار للمستخدم على Telegram
+Cannot GET /status/job_1770445596064
 ```
+هذا يعني ان كل عمليات الدمج ستبقى عالقة للابد لان السيرفر لا يستجيب.
 
-### الـ Secrets المطلوبة
+**البيانات الحالية**: 3 مهام عالقة في حالة `processing` بنسبة 85% بدون `output_url`.
 
-| Secret | الحالة | الملاحظات |
-|--------|--------|-----------|
-| GEMINI_API_KEY | موجود | لتوليد النصوص |
-| HF_READ_TOKEN | موجود | لـ Flux و FFmpeg |
-| HF_SPACE_URL | موجود | ff.hf.space |
-| YOUTUBE_CLIENT_ID | موجود | لـ OAuth |
-| YOUTUBE_CLIENT_SECRET | موجود | لـ OAuth |
-| TELEGRAM_WEBHOOK_SECRET | غير موجود | يجب إضافته |
+### 2. مشكلة ElevenLabs: المفاتيح تُلغى تفعيلها تلقائيا
+السبب: الكود الحالي في `elevenlabs.ts` لا يحتوي على اي منطق لاعادة المحاولة. عند فشل اي مفتاح (حتى لو كان خطأ مؤقت)، يرمي خطأ ويفشل الوظيفة بالكامل. 3 من 4 مفاتيح معطلة حاليا (`is_active: false`).
 
-### ElevenLabs Keys في قاعدة البيانات
-
-المفاتيح تُخزن في جدول `elevenlabs_keys` وليس كـ environment variables:
-- مفتاح واحد نشط حالياً
-- النظام يختار المفتاح الأقل استخداماً تلقائياً
-
-### أمر التسجيل الكامل
-
-```bash
-curl -X POST "https://api.telegram.org/bot6086731822:AAFEOi5qL_Ts-gsCj8C_JZ1lnLYb_expaio/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "url": "https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/telegram-webhook",
-    "secret_token": "YOUR_SECRET_HERE"
-  }'
-```
+### 3. مشكلة الواجهة: صفحة تفاصيل المهمة بالتصميم القديم
+صفحة `JobDetails.tsx` لا تستخدم `DashboardLayout` وتحتوي على class `dark` ثابت، مما يجعلها تظهر بالثيم الداكن القديم بينما باقي الصفحات بالثيم الفاتح الجديد.
 
 ---
 
-## ملخص التغييرات
+## خطة الاصلاح
 
-| النوع | التفاصيل |
-|-------|----------|
-| إضافة Secret | TELEGRAM_WEBHOOK_SECRET |
-| إعداد خارجي | تسجيل Webhook مع Telegram API |
-| إعادة ربط | YouTube OAuth (اختياري للنشر) |
-| تغييرات كود | لا يوجد - الكود جاهز |
+### المرحلة 1: اصلاح سيرفر FFmpeg والتعامل مع التعطل
+
+**الملفات**: `_shared/huggingface.ts`, `job-status/index.ts`
+
+- اضافة فحص سريع لحالة السيرفر قبل بدء الدمج (health check)
+- اذا كان السيرفر لا يستجيب: فشل فوري مع رسالة واضحة بدلا من الانتظار اللانهائي
+- تحسين `checkMergeStatus` ليكتشف استجابات HTML (صفحات خطأ) ويميزها عن JSON
+- اضافة حد اقصى لعدد محاولات الـ polling المتتالية الفاشلة (مثلا 10 محاولات فاشلة = فشل المهمة)
+- تحديث المهام العالقة الحالية في قاعدة البيانات لتكون `failed` مع رسالة توضيحية
+- عرض رسالة خطأ واضحة في الواجهة عند تعطل سيرفر الدمج
+
+### المرحلة 2: اصلاح ElevenLabs - نظام اعادة محاولة ذكي
+
+**الملفات**: `_shared/elevenlabs.ts`
+
+- اضافة نظام retry يحاول حتى 3 مفاتيح مختلفة قبل الفشل
+- التمييز بين انواع الاخطاء:
+  - `detected_unusual_activity` -> تعطيل المفتاح تلقائيا (حظر دائم)
+  - `quota_exceeded` -> تعطيل المفتاح مع رسالة واضحة
+  - 401 عادي -> اعادة محاولة بمفتاح آخر بدون تعطيل
+  - اخطاء اخرى (500, timeout) -> اعادة محاولة بدون تعطيل
+- تسجيل log تفصيلي لكل محاولة لتسهيل التشخيص
+
+### المرحلة 3: تحديث واجهة صفحة تفاصيل المهمة
+
+**الملفات**: `src/pages/JobDetails.tsx`
+
+- تغليف الصفحة بـ `DashboardLayout` بدلا من div عادي
+- ازالة class `dark` الثابت لاستخدام الثيم الفاتح الجديد
+- تطبيق نفس نمط التصميم (الالوان، الظلال، الاتجاه) المستخدم في باقي الصفحات
+
+---
+
+## التفاصيل التقنية
+
+### تغييرات `_shared/huggingface.ts`
+- اضافة دالة `isHtmlErrorResponse()` لاكتشاف استجابات HTML بدلا من محاولة parse JSON
+- اضافة health check سريع (HEAD request) قبل ارسال طلب الدمج
+- تقليل عدد endpoint candidates في `checkMergeStatus` والتركيز على الـ endpoints الصحيحة فقط
+- اضافة عداد فشل في `pollForMergeCompletion` - اذا فشلت 10 محاولات متتالية تفشل المهمة
+
+### تغييرات `_shared/elevenlabs.ts`
+- `generateSpeech()` يصبح:
+  1. جلب كل المفاتيح النشطة
+  2. محاولة الاولى بالمفتاح الاقل استخداما
+  3. عند فشل -> فحص نوع الخطأ -> تعطيل او اعادة محاولة
+  4. المحاولة التالية بمفتاح آخر
+  5. اذا كل المفاتيح فشلت -> خطأ نهائي
+
+### تغييرات `job-status/index.ts`
+- اضافة عداد لعدد تكرارات فشل فحص حالة الدمج
+- تخزين عدد المحاولات الفاشلة في `output_data` الخاص بخطوة الدمج
+- اذا وصل العداد الى 20 محاولة فاشلة: تفشيل المهمة تلقائيا مع رسالة "سيرفر الدمج لا يستجيب"
+
+### تغييرات `JobDetails.tsx`
+- استبدال `<div className="min-h-screen bg-background dark">` بـ `<DashboardLayout>`
+- ازالة الـ container wrapper الزائد
+- تحديث الالوان لتتوافق مع الثيم الفاتح
+
+### تنظيف قاعدة البيانات
+- تحديث المهام الثلاث العالقة الى `failed` مع رسالة توضيحية
+- اعادة تفعيل المفاتيح الصالحة في `elevenlabs_keys`
 
