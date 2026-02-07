@@ -8,21 +8,56 @@ interface ElevenLabsKey {
   is_active: boolean;
 }
 
-export async function getNextElevenLabsKey(): Promise<{ key: string; keyId: string } | null> {
-  // Get the least used active key
+/**
+ * Fetch all active ElevenLabs keys ordered by usage (least used first).
+ */
+async function getActiveKeys(): Promise<ElevenLabsKey[]> {
   const { data: keys, error } = await supabase
     .from("elevenlabs_keys")
     .select("*")
     .eq("is_active", true)
-    .order("usage_count", { ascending: true })
-    .limit(1);
+    .order("usage_count", { ascending: true });
 
-  if (error || !keys || keys.length === 0) {
-    console.error("No active ElevenLabs keys found:", error);
-    return null;
+  if (error) {
+    console.error("Error fetching ElevenLabs keys:", error);
+    return [];
   }
 
-  const selectedKey = keys[0] as ElevenLabsKey;
+  return (keys || []) as ElevenLabsKey[];
+}
+
+/**
+ * Determine whether an error should permanently deactivate the key.
+ */
+function shouldDeactivateKey(status: number, errorText: string): boolean {
+  const lower = errorText.toLowerCase();
+  // Only deactivate on clear permanent blocks
+  return (
+    lower.includes("detected_unusual_activity") ||
+    lower.includes("quota_exceeded") ||
+    lower.includes("invalid_api_key") ||
+    lower.includes("api key is invalid")
+  );
+}
+
+/**
+ * Determine whether the error is retryable with a different key.
+ */
+function isRetryableError(status: number, errorText: string): boolean {
+  // 401 without permanent block = try another key
+  if (status === 401) return true;
+  // Server errors = transient
+  if (status >= 500) return true;
+  // Rate limiting
+  if (status === 429) return true;
+  return false;
+}
+
+export async function getNextElevenLabsKey(): Promise<{ key: string; keyId: string } | null> {
+  const keys = await getActiveKeys();
+  if (keys.length === 0) return null;
+
+  const selectedKey = keys[0];
 
   // Increment usage count
   await supabase
@@ -45,44 +80,94 @@ export async function generateSpeech(
   text: string,
   voiceId: string = "onwK4e9ZLuTAKqWW03F9" // Daniel - Arabic-friendly voice
 ): Promise<ArrayBuffer | null> {
-  const keyData = await getNextElevenLabsKey();
-  
-  if (!keyData) {
-    throw new Error("No active ElevenLabs API keys available");
+  const keys = await getActiveKeys();
+
+  if (keys.length === 0) {
+    throw new Error("لا توجد مفاتيح ElevenLabs نشطة. أضف مفتاحاً جديداً من الإعدادات.");
   }
 
-  console.log(`Generating speech with voice ${voiceId}, text length: ${text.length}`);
+  const maxRetries = Math.min(keys.length, 3);
+  const errors: string[] = [];
 
-  // IMPORTANT: output_format must be passed as query parameter, NOT in request body
-  const response = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
-    {
-      method: "POST",
-      headers: {
-        "xi-api-key": keyData.key,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.5,
-          use_speaker_boost: true,
-        },
-      }),
+  for (let i = 0; i < maxRetries; i++) {
+    const currentKey = keys[i];
+    console.log(`[ElevenLabs] محاولة ${i + 1}/${maxRetries} - مفتاح: ${currentKey.name}`);
+
+    try {
+      // Increment usage
+      await supabase
+        .from("elevenlabs_keys")
+        .update({
+          usage_count: currentKey.usage_count + 1,
+          last_used_at: new Date().toISOString(),
+        })
+        .eq("id", currentKey.id);
+
+      const response = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": currentKey.api_key,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text,
+            model_id: "eleven_multilingual_v2",
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+              style: 0.5,
+              use_speaker_boost: true,
+            },
+          }),
+        }
+      );
+
+      if (response.ok) {
+        const audioBuffer = await response.arrayBuffer();
+        console.log(`[ElevenLabs] ✅ نجح مع مفتاح ${currentKey.name}, حجم: ${audioBuffer.byteLength}`);
+        return audioBuffer;
+      }
+
+      // Handle error
+      const errorText = await response.text();
+      console.error(`[ElevenLabs] ❌ مفتاح ${currentKey.name} فشل: HTTP ${response.status} - ${errorText}`);
+
+      // Should we permanently deactivate this key?
+      if (shouldDeactivateKey(response.status, errorText)) {
+        console.warn(`[ElevenLabs] 🔒 تعطيل المفتاح ${currentKey.name} نهائياً: ${errorText.slice(0, 100)}`);
+        await supabase
+          .from("elevenlabs_keys")
+          .update({ is_active: false })
+          .eq("id", currentKey.id);
+        errors.push(`${currentKey.name}: محظور نهائياً`);
+        continue; // Try next key
+      }
+
+      // Retryable error? Try next key without deactivating
+      if (isRetryableError(response.status, errorText)) {
+        errors.push(`${currentKey.name}: خطأ مؤقت (${response.status})`);
+        continue; // Try next key
+      }
+
+      // Non-retryable, non-permanent error (e.g. 400 bad request)
+      errors.push(`${currentKey.name}: ${response.status} - ${errorText.slice(0, 100)}`);
+      throw new Error(`ElevenLabs API error: ${response.status} - ${errorText}`);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("ElevenLabs API error:")) {
+        throw err; // Re-throw non-retryable errors
+      }
+      // Network errors etc. – try next key
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[ElevenLabs] ⚠️ خطأ شبكة مع ${currentKey.name}: ${msg}`);
+      errors.push(`${currentKey.name}: ${msg}`);
+      continue;
     }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    console.error("ElevenLabs error:", response.status, errorText);
-    throw new Error(`ElevenLabs API error: ${response.status} - ${errorText}`);
   }
 
-  const audioBuffer = await response.arrayBuffer();
-  console.log("Voice generated successfully, size:", audioBuffer.byteLength);
-
-  return audioBuffer;
+  // All keys exhausted
+  throw new Error(
+    `فشلت جميع مفاتيح ElevenLabs (${maxRetries} محاولات):\n${errors.join("\n")}`
+  );
 }

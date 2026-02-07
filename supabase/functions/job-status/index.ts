@@ -3,17 +3,17 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus } from "../_shared/huggingface.ts";
 
+const MAX_CONSECUTIVE_FAILURES = 20;
+
 // ===== AUTH HELPER =====
 async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
   const authHeader = req.headers.get("Authorization");
   
-  // Check for service role key (internal calls)
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (authHeader === `Bearer ${serviceRoleKey}`) {
     return { valid: true };
   }
   
-  // Check for user JWT
   if (!authHeader?.startsWith("Bearer ")) {
     return { valid: false, error: "Authorization header required" };
   }
@@ -34,13 +34,11 @@ async function validateAuth(req: Request): Promise<{ valid: boolean; error?: str
 }
 
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // ===== SECURITY: Validate authentication =====
     const auth = await validateAuth(req);
     if (!auth.valid) {
       return new Response(
@@ -49,7 +47,6 @@ serve(async (req) => {
       );
     }
 
-    // Extract jobId from URL path (/job-status/{jobId}) OR from body/query (invoke-friendly)
     const url = new URL(req.url);
     const pathParts = url.pathname.split("/").filter(Boolean);
     const maybeFromPath = pathParts[pathParts.length - 1];
@@ -62,7 +59,6 @@ serve(async (req) => {
       const fromQuery = url.searchParams.get("job_id") || url.searchParams.get("jobId");
       if (fromQuery) jobId = fromQuery;
       else {
-        // Try JSON body (Supabase functions.invoke)
         const body = await req.json().catch(() => ({} as any));
         jobId = body?.job_id || body?.jobId || null;
       }
@@ -75,16 +71,13 @@ serve(async (req) => {
       );
     }
 
-    // Fetch job details
     const { data: job, error: jobError } = await supabase
       .from("jobs")
       .select("*")
       .eq("id", jobId)
       .maybeSingle();
 
-    if (jobError) {
-      throw new Error(`Failed to fetch job: ${jobError.message}`);
-    }
+    if (jobError) throw new Error(`Failed to fetch job: ${jobError.message}`);
 
     if (!job) {
       return new Response(
@@ -93,20 +86,15 @@ serve(async (req) => {
       );
     }
 
-    // Fetch job steps
     let { data: steps, error: stepsError } = await supabase
       .from("job_steps")
       .select("*")
       .eq("job_id", jobId)
       .order("step_order");
 
-    if (stepsError) {
-      throw new Error(`Failed to fetch job steps: ${stepsError.message}`);
-    }
+    if (stepsError) throw new Error(`Failed to fetch job steps: ${stepsError.message}`);
 
-    // --- MERGE TICK (fix stuck merges) ---
-    // If we are currently in media_merge and we have a provider_job_id, we can advance the job
-    // by checking provider status. This makes the system resilient even if ai-generate was killed.
+    // --- MERGE TICK ---
     const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
     const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
@@ -115,10 +103,13 @@ serve(async (req) => {
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
 
     if (job.status === "processing" && providerJobId && !job.output_url) {
+      // Track consecutive failures
+      const currentFailures: number = mergeOutput?.consecutive_failures || 0;
+
       try {
         const providerStatus = await checkMergeStatus(providerJobId);
 
-        // Persist heartbeat/progress from provider
+        // Success – reset failure counter
         if (providerStatus.status === "processing") {
           const mapped = Math.min(
             89,
@@ -141,6 +132,7 @@ serve(async (req) => {
                   provider_progress: providerStatus.progress,
                   provider_status: providerStatus.status,
                   stage: "processing",
+                  consecutive_failures: 0, // Reset on successful check
                 },
               })
               .eq("id", mergeStep.id);
@@ -167,7 +159,6 @@ serve(async (req) => {
             throw new Error("Merge completed but no output URL returned");
           }
 
-          // Download and persist to our storage (stable URL)
           const providerOutputUrl = providerStatus.output_url;
           const videoResp = await fetch(providerOutputUrl);
           if (!videoResp.ok) {
@@ -183,9 +174,7 @@ serve(async (req) => {
               upsert: true,
             });
 
-          if (uploadErr) {
-            throw new Error(`Final video upload failed: ${uploadErr.message}`);
-          }
+          if (uploadErr) throw new Error(`Final video upload failed: ${uploadErr.message}`);
 
           const { data: publicUrlData } = supabase.storage
             .from("media-output")
@@ -206,18 +195,17 @@ serve(async (req) => {
                   provider_output_url: providerOutputUrl,
                   output_url: finalUrl,
                   stage: "persisted",
+                  consecutive_failures: 0,
                 },
               })
               .eq("id", mergeStep.id);
           }
 
-          // Mark job as completed (publishing can be handled separately if needed)
           await supabase
             .from("jobs")
             .update({ status: "completed", progress: 100, output_url: finalUrl, error_message: null })
             .eq("id", jobId);
 
-          // If there's a publishing step, mark it completed (no-op publish here to avoid heavy work)
           if (publishStep?.id && publishStep.status !== "completed") {
             await supabase
               .from("job_steps")
@@ -230,34 +218,69 @@ serve(async (req) => {
               .eq("id", publishStep.id);
           }
         }
-
-        // Refresh after tick so the response reflects the newest DB state
-        const refreshedJob = await supabase.from("jobs").select("*").eq("id", jobId).maybeSingle();
-        if (refreshedJob.data) {
-          // @ts-ignore
-          job.status = refreshedJob.data.status;
-          // @ts-ignore
-          job.progress = refreshedJob.data.progress;
-          // @ts-ignore
-          job.output_url = refreshedJob.data.output_url;
-          // @ts-ignore
-          job.error_message = refreshedJob.data.error_message;
-          // @ts-ignore
-          job.updated_at = refreshedJob.data.updated_at;
-        }
-
-        const refreshedSteps = await supabase
-          .from("job_steps")
-          .select("*")
-          .eq("job_id", jobId)
-          .order("step_order");
-        if (refreshedSteps.data) steps = refreshedSteps.data;
       } catch (e) {
         console.error("Merge tick error:", e);
+
+        // Increment failure counter
+        const newFailures = currentFailures + 1;
+        console.warn(`Merge tick failure ${newFailures}/${MAX_CONSECUTIVE_FAILURES} for job ${jobId}`);
+
+        if (mergeStep?.id) {
+          await supabase
+            .from("job_steps")
+            .update({
+              output_data: {
+                ...(mergeOutput || {}),
+                consecutive_failures: newFailures,
+                last_error: e instanceof Error ? e.message : String(e),
+              },
+            })
+            .eq("id", mergeStep.id);
+        }
+
+        // If too many consecutive failures, fail the job
+        if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
+          const failMsg = `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية`;
+
+          if (mergeStep?.id) {
+            await supabase
+              .from("job_steps")
+              .update({
+                status: "failed",
+                error_message: failMsg,
+                completed_at: new Date().toISOString(),
+              })
+              .eq("id", mergeStep.id);
+          }
+
+          await supabase
+            .from("jobs")
+            .update({ status: "failed", error_message: failMsg })
+            .eq("id", jobId);
+        }
       }
+
+      // Refresh after tick
+      const refreshedJob = await supabase.from("jobs").select("*").eq("id", jobId).maybeSingle();
+      if (refreshedJob.data) {
+        Object.assign(job, {
+          status: refreshedJob.data.status,
+          progress: refreshedJob.data.progress,
+          output_url: refreshedJob.data.output_url,
+          error_message: refreshedJob.data.error_message,
+          updated_at: refreshedJob.data.updated_at,
+        });
+      }
+
+      const refreshedSteps = await supabase
+        .from("job_steps")
+        .select("*")
+        .eq("job_id", jobId)
+        .order("step_order");
+      if (refreshedSteps.data) steps = refreshedSteps.data;
     }
 
-    // Build logs array from steps with timing info
+    // Build logs
     const logs: Array<{
       step: string;
       status: string;
@@ -305,15 +328,14 @@ serve(async (req) => {
       });
     }
 
-    // Check if job appears stuck (processing for too long without progress)
+    // Stuck detection
     let isStuck = false;
     let stuckWarning: string | undefined;
-    
+
     if (job.status === "processing") {
-      const processingStep = (steps || []).find((s) => s.status === "processing");
+      const processingStep = (steps || []).find((s: any) => s.status === "processing");
       if (processingStep?.started_at) {
         const processingDuration = Date.now() - new Date(processingStep.started_at).getTime();
-        // Warn if processing for more than 3 minutes
         if (processingDuration > 3 * 60 * 1000) {
           isStuck = true;
           stuckWarning = `العملية متعطلة منذ ${Math.floor(processingDuration / 60000)} دقيقة في خطوة "${processingStep.step_name}"`;
@@ -334,7 +356,6 @@ serve(async (req) => {
         logs,
         is_stuck: isStuck,
         stuck_warning: stuckWarning,
-        // Convenience flags for client
         is_complete: job.status === "completed",
         is_failed: job.status === "failed",
         can_cancel: job.status === "pending" || job.status === "processing",
