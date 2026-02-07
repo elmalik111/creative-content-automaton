@@ -7,7 +7,6 @@ function normalizeMaybeUrl(raw?: unknown): string | undefined {
   const v = raw.trim();
   if (!v) return undefined;
 
-  // Some providers return relative paths like "/file=...".
   try {
     return new URL(v, HF_SPACE_URL).toString();
   } catch {
@@ -37,8 +36,43 @@ function extractOutputUrl(raw: any): string | undefined {
   return normalizeMaybeUrl(v);
 }
 
+/**
+ * Detects HTML error pages (404, 502, etc.) that are NOT valid JSON responses.
+ */
+function isHtmlErrorResponse(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  return (
+    trimmed.startsWith("<!doctype") ||
+    trimmed.startsWith("<html") ||
+    trimmed.startsWith("<head") ||
+    trimmed.includes("cannot get /") ||
+    trimmed.includes("page not found") ||
+    trimmed.includes("404")
+  );
+}
+
+/**
+ * Quick health check – returns true if the FFmpeg Space is reachable.
+ */
+export async function isFFmpegSpaceHealthy(): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+
+    const resp = await fetch(HF_SPACE_URL, {
+      method: "HEAD",
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+
+    // 404 means the Space is down / not deployed
+    return resp.ok || resp.status === 405; // 405 = Method Not Allowed is fine (server exists)
+  } catch {
+    return false;
+  }
+}
+
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  // Using the Hugging Face Router API with FLUX.1-schnell (updated endpoint)
   const response = await fetch(
     "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
     {
@@ -83,8 +117,7 @@ export interface MergeMediaResponse {
 
 /**
  * Starts a merge job on the FFmpeg Space and returns the *initial* response (no polling).
- * This is critical for serverless reliability: long polling should not happen inside a
- * single edge-function invocation.
+ * Includes a health check to fail fast if the server is down.
  */
 export async function startMergeWithFFmpeg(
   request: MergeMediaRequest
@@ -94,6 +127,12 @@ export async function startMergeWithFFmpeg(
 
   if (!imageUrl || !audioUrl) {
     throw new Error("Missing imageUrl or audioUrl");
+  }
+
+  // Health check – fail fast instead of hanging
+  const healthy = await isFFmpegSpaceHealthy();
+  if (!healthy) {
+    throw new Error("سيرفر الدمج (FFmpeg Space) غير متاح حالياً. يرجى المحاولة لاحقاً.");
   }
 
   const payload = {
@@ -116,12 +155,24 @@ export async function startMergeWithFFmpeg(
     body: JSON.stringify(payload),
   });
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`FFmpeg Space error: ${error}`);
+  const responseText = await response.text();
+
+  // Detect HTML error pages
+  if (isHtmlErrorResponse(responseText)) {
+    throw new Error(`سيرفر الدمج أرجع صفحة خطأ (HTTP ${response.status}). السيرفر قد يكون معطل.`);
   }
 
-  const rawResult = await response.json();
+  if (!response.ok) {
+    throw new Error(`FFmpeg Space error: ${responseText}`);
+  }
+
+  let rawResult: any;
+  try {
+    rawResult = JSON.parse(responseText);
+  } catch {
+    throw new Error(`FFmpeg Space returned invalid JSON: ${responseText.slice(0, 200)}`);
+  }
+
   console.log("FFmpeg Space initial response:", JSON.stringify(rawResult));
 
   return {
@@ -137,15 +188,13 @@ export async function startMergeWithFFmpeg(
 export async function mergeMediaWithFFmpeg(
   request: MergeMediaRequest
 ): Promise<MergeMediaResponse> {
-  // Transform to the format expected by the FFmpeg Space (imageUrl and audioUrl)
   const imageUrl = request.images?.[0] || request.videos?.[0];
   const audioUrl = request.audio;
-  
+
   if (!imageUrl || !audioUrl) {
     throw new Error("Missing imageUrl or audioUrl");
   }
 
-  // Send in the format the server expects
   const payload = {
     imageUrl,
     audioUrl,
@@ -166,69 +215,76 @@ export async function mergeMediaWithFFmpeg(
     body: JSON.stringify(payload),
   });
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`FFmpeg Space error: ${error}`);
+  const responseText = await response.text();
+
+  if (isHtmlErrorResponse(responseText)) {
+    throw new Error(`سيرفر الدمج أرجع صفحة خطأ (HTTP ${response.status}). السيرفر قد يكون معطل.`);
   }
 
-  const rawResult = await response.json();
-  
+  if (!response.ok) {
+    throw new Error(`FFmpeg Space error: ${responseText}`);
+  }
+
+  let rawResult: any;
+  try {
+    rawResult = JSON.parse(responseText);
+  } catch {
+    throw new Error(`FFmpeg Space returned invalid JSON: ${responseText.slice(0, 200)}`);
+  }
+
   console.log("FFmpeg Space initial response:", JSON.stringify(rawResult));
-  
-  // Normalize the response - FFmpeg Space returns jobId (camelCase)
+
   const result: MergeMediaResponse = {
     status: rawResult.status || "processing",
     progress: rawResult.progress ?? 0,
     output_url: extractOutputUrl(rawResult),
     error: rawResult.error,
-    job_id: extractJobId(rawResult), // Support both naming conventions
+    job_id: extractJobId(rawResult),
     message: rawResult.message,
   };
-  
-  // If the merge returns a job_id, we need to poll for completion
+
   if (result.job_id && result.status === "processing") {
     console.log(`Merge job started with ID: ${result.job_id}, polling for completion...`);
     return await pollForMergeCompletion(result);
   }
-  
-  // If immediately completed or failed
+
   if (result.status === "completed" || result.status === "failed") {
     return result;
   }
 
-  // For async jobs without job_id, try to poll using output_url
   if (result.status === "processing") {
     console.log("Merge started without job_id, polling for completion...");
     return await pollForMergeCompletion(result);
   }
-  
+
   return result;
 }
 
 async function pollForMergeCompletion(
   initialResult: MergeMediaResponse,
-  maxAttempts = 60, // 5 minutes max (5 seconds * 60)
+  maxAttempts = 60,
   pollInterval = 5000
 ): Promise<MergeMediaResponse> {
   let attempts = 0;
+  let consecutiveFailures = 0;
   let result = initialResult;
-  
-  // Get the job_id from the initial result
+
   const jobId = result.job_id;
-  
+
   if (!jobId) {
     console.log("No job_id available for polling");
     return result;
   }
-  
+
   while (result.status === "processing" && attempts < maxAttempts) {
     attempts++;
     console.log(`Polling merge status for job ${jobId}... attempt ${attempts}/${maxAttempts}`);
-    
-    await new Promise(resolve => setTimeout(resolve, pollInterval));
-    
+
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+
     try {
       const status = await checkMergeStatus(jobId);
+      consecutiveFailures = 0; // Reset on success
 
       result = {
         ...result,
@@ -238,16 +294,25 @@ async function pollForMergeCompletion(
         error: status.error || result.error,
       };
 
-      // If we got an output_url, consider it completed.
       if (result.output_url && result.output_url.startsWith("http")) {
         result.status = "completed";
         console.log(`Merge completed with output URL: ${result.output_url}`);
       }
     } catch (pollError) {
-      console.error(`Poll attempt ${attempts} failed:`, pollError);
+      consecutiveFailures++;
+      console.error(`Poll attempt ${attempts} failed (consecutive: ${consecutiveFailures}):`, pollError);
+
+      // If 10 consecutive failures, the server is likely down
+      if (consecutiveFailures >= 10) {
+        return {
+          status: "failed",
+          progress: result.progress,
+          error: "سيرفر الدمج لا يستجيب بعد 10 محاولات متتالية فاشلة",
+        };
+      }
     }
   }
-  
+
   if (attempts >= maxAttempts && result.status === "processing") {
     return {
       status: "failed",
@@ -255,29 +320,28 @@ async function pollForMergeCompletion(
       error: "Merge timeout: Operation took too long",
     };
   }
-  
+
   return result;
 }
 
+/**
+ * Check the status of a merge job. Tries only the most reliable endpoints.
+ * Detects HTML error pages and counts them as failures.
+ */
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
-  const candidates: Array<
-    | { method: "GET"; url: string }
-    | { method: "POST"; url: string; body?: Record<string, unknown> }
-  > = [
-    { method: "GET", url: `${HF_SPACE_URL}/status/${jobId}` },
-    { method: "GET", url: `${HF_SPACE_URL}/merge/status/${jobId}` },
-    { method: "GET", url: `${HF_SPACE_URL}/merge/status?jobId=${encodeURIComponent(jobId)}` },
-    { method: "GET", url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}` },
-    { method: "POST", url: `${HF_SPACE_URL}/status`, body: { jobId } },
-    { method: "POST", url: `${HF_SPACE_URL}/merge/status`, body: { jobId } },
-    { method: "POST", url: `${HF_SPACE_URL}/status/${jobId}` },
-    { method: "POST", url: `${HF_SPACE_URL}/merge/status/${jobId}` },
+  const candidates = [
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}` },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/merge/status/${jobId}` },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId } },
   ];
 
   let lastErr: string | undefined;
 
   for (const c of candidates) {
     try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+
       const resp = await fetch(c.url, {
         method: c.method,
         headers: {
@@ -285,15 +349,32 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
           ...(c.method === "POST" ? { "Content-Type": "application/json" } : {}),
         },
         body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
+        signal: ctrl.signal,
       });
 
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        lastErr = `HTTP ${resp.status} from ${c.method} ${c.url}: ${text}`;
+      clearTimeout(timer);
+
+      const text = await resp.text();
+
+      // Detect HTML error pages
+      if (isHtmlErrorResponse(text)) {
+        lastErr = `HTML error page from ${c.method} ${c.url}: ${text.slice(0, 100)}`;
         continue;
       }
 
-      const raw = await resp.json();
+      if (!resp.ok) {
+        lastErr = `HTTP ${resp.status} from ${c.method} ${c.url}: ${text.slice(0, 200)}`;
+        continue;
+      }
+
+      let raw: any;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        lastErr = `Invalid JSON from ${c.method} ${c.url}: ${text.slice(0, 100)}`;
+        continue;
+      }
+
       return {
         status: raw.status || "processing",
         progress: raw.progress ?? 0,
