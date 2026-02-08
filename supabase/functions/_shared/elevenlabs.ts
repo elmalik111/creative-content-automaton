@@ -27,91 +27,29 @@ async function getActiveKeys(): Promise<ElevenLabsKey[]> {
 }
 
 /**
- * Reactivate a specific key (useful if it was deactivated by mistake)
- */
-export async function reactivateKey(keyId: string): Promise<void> {
-  const { error } = await supabase
-    .from("elevenlabs_keys")
-    .update({ is_active: true })
-    .eq("id", keyId);
-
-  if (error) {
-    console.error("Error reactivating key:", error);
-    throw error;
-  }
-  
-  console.log(`✅ Key ${keyId} has been reactivated`);
-}
-
-/**
- * Reactivate all deactivated keys (use with caution!)
- */
-export async function reactivateAllKeys(): Promise<void> {
-  const { error } = await supabase
-    .from("elevenlabs_keys")
-    .update({ is_active: true })
-    .eq("is_active", false);
-
-  if (error) {
-    console.error("Error reactivating keys:", error);
-    throw error;
-  }
-  
-  console.log(`✅ All keys have been reactivated`);
-}
-
-/**
  * Determine whether an error should permanently deactivate the key.
  */
 function shouldDeactivateKey(status: number, errorText: string): boolean {
   const lower = errorText.toLowerCase();
-  
-  // Only deactivate on VERY specific permanent errors
-  const isPermanentError = (
-    // Invalid API key - must have explicit "invalid" message
-    (status === 401 && (
-      lower.includes("invalid_api_key") ||
-      lower.includes("invalid api key") ||
-      lower.includes("api key is invalid") ||
-      (lower.includes("unauthorized") && lower.includes("invalid"))
-    )) ||
-    // Account suspended or unusual activity
+  // Only deactivate on clear permanent blocks
+  return (
     lower.includes("detected_unusual_activity") ||
-    lower.includes("account suspended") ||
-    lower.includes("account has been suspended")
+    lower.includes("quota_exceeded") ||
+    lower.includes("invalid_api_key") ||
+    lower.includes("api key is invalid")
   );
-  
-  // Log deactivation decision for debugging
-  if (isPermanentError) {
-    console.warn(`[shouldDeactivateKey] 🔒 سيتم تعطيل المفتاح - Status: ${status}, Error: ${errorText.slice(0, 200)}`);
-  } else {
-    console.log(`[shouldDeactivateKey] ✓ لن يتم تعطيل المفتاح - Status: ${status}`);
-  }
-  
-  return isPermanentError;
 }
 
 /**
  * Determine whether the error is retryable with a different key.
  */
 function isRetryableError(status: number, errorText: string): boolean {
-  const lower = errorText.toLowerCase();
-  
-  // Rate limiting - definitely retry with next key
-  if (status === 429) return true;
-  
-  // Quota exceeded - try next key (DON'T deactivate permanently!)
-  if (lower.includes("quota_exceeded") || 
-      lower.includes("quota exceeded") ||
-      lower.includes("insufficient quota") ||
-      lower.includes("character limit")) return true;
-  
-  // Server errors - transient issues
+  // 401 without permanent block = try another key
+  if (status === 401) return true;
+  // Server errors = transient
   if (status >= 500) return true;
-  
-  // 401 errors that DON'T explicitly say "invalid" - could be temporary
-  if (status === 401 && !lower.includes("invalid")) return true;
-  
+  // Rate limiting
+  if (status === 429) return true;
   return false;
 }
 
@@ -145,7 +83,7 @@ export async function generateSpeech(
   const keys = await getActiveKeys();
 
   if (keys.length === 0) {
-    throw new Error("لا توجد مفاتيح ElevenLabs نشطة. أضف مفتاحاً جديداً من الإعدادات.");
+    throw new Error("Ù„Ø§ ØªÙˆØ¬Ø¯ Ù…ÙØ§ØªÙŠØ­ ElevenLabs Ù†Ø´Ø·Ø©. Ø£Ø¶Ù Ù…ÙØªØ§Ø­Ø§Ù‹ Ø¬Ø¯ÙŠØ¯Ø§Ù‹ Ù…Ù† Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª.");
   }
 
   const maxRetries = Math.min(keys.length, 3);
@@ -153,7 +91,7 @@ export async function generateSpeech(
 
   for (let i = 0; i < maxRetries; i++) {
     const currentKey = keys[i];
-    console.log(`[ElevenLabs] محاولة ${i + 1}/${maxRetries} - مفتاح: ${currentKey.name}`);
+    console.log(`[ElevenLabs] Ù…Ø­Ø§ÙˆÙ„Ø© ${i + 1}/${maxRetries} - Ù…ÙØªØ§Ø­: ${currentKey.name}`);
 
     try {
       // Increment usage
@@ -188,28 +126,28 @@ export async function generateSpeech(
 
       if (response.ok) {
         const audioBuffer = await response.arrayBuffer();
-        console.log(`[ElevenLabs] ✅ نجح مع مفتاح ${currentKey.name}, حجم: ${audioBuffer.byteLength}`);
+        console.log(`[ElevenLabs] âœ… Ù†Ø¬Ø­ Ù…Ø¹ Ù…ÙØªØ§Ø­ ${currentKey.name}, Ø­Ø¬Ù…: ${audioBuffer.byteLength}`);
         return audioBuffer;
       }
 
       // Handle error
       const errorText = await response.text();
-      console.error(`[ElevenLabs] ❌ مفتاح ${currentKey.name} فشل: HTTP ${response.status} - ${errorText}`);
+      console.error(`[ElevenLabs] âŒ Ù…ÙØªØ§Ø­ ${currentKey.name} ÙØ´Ù„: HTTP ${response.status} - ${errorText}`);
 
       // Should we permanently deactivate this key?
       if (shouldDeactivateKey(response.status, errorText)) {
-        console.warn(`[ElevenLabs] 🔒 تعطيل المفتاح ${currentKey.name} نهائياً: ${errorText.slice(0, 100)}`);
+        console.warn(`[ElevenLabs] ðŸ”’ ØªØ¹Ø·ÙŠÙ„ Ø§Ù„Ù…ÙØªØ§Ø­ ${currentKey.name} Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹: ${errorText.slice(0, 100)}`);
         await supabase
           .from("elevenlabs_keys")
           .update({ is_active: false })
           .eq("id", currentKey.id);
-        errors.push(`${currentKey.name}: محظور نهائياً`);
+        errors.push(`${currentKey.name}: Ù…Ø­Ø¸ÙˆØ± Ù†Ù‡Ø§Ø¦ÙŠØ§Ù‹`);
         continue; // Try next key
       }
 
       // Retryable error? Try next key without deactivating
       if (isRetryableError(response.status, errorText)) {
-        errors.push(`${currentKey.name}: خطأ مؤقت (${response.status})`);
+        errors.push(`${currentKey.name}: Ø®Ø·Ø£ Ù…Ø¤Ù‚Øª (${response.status})`);
         continue; // Try next key
       }
 
@@ -220,9 +158,9 @@ export async function generateSpeech(
       if (err instanceof Error && err.message.startsWith("ElevenLabs API error:")) {
         throw err; // Re-throw non-retryable errors
       }
-      // Network errors etc. – try next key
+      // Network errors etc. â€“ try next key
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[ElevenLabs] ⚠️ خطأ شبكة مع ${currentKey.name}: ${msg}`);
+      console.error(`[ElevenLabs] âš ï¸ Ø®Ø·Ø£ Ø´Ø¨ÙƒØ© Ù…Ø¹ ${currentKey.name}: ${msg}`);
       errors.push(`${currentKey.name}: ${msg}`);
       continue;
     }
@@ -230,6 +168,6 @@ export async function generateSpeech(
 
   // All keys exhausted
   throw new Error(
-    `فشلت جميع مفاتيح ElevenLabs (${maxRetries} محاولات):\n${errors.join("\n")}`
+    `ÙØ´Ù„Øª Ø¬Ù…ÙŠØ¹ Ù…ÙØ§ØªÙŠØ­ ElevenLabs (${maxRetries} Ù…Ø­Ø§ÙˆÙ„Ø§Øª):\n${errors.join("\n")}`
   );
 }
