@@ -558,102 +558,52 @@ async function verifyTelegram(action?: string): Promise<Response> {
 }
 
 async function verifyElevenLabs(specificKey?: string): Promise<Response> {
-  // If a specific key is provided, test only that key
-  if (specificKey) {
-    const userResponse = await fetch("https://api.elevenlabs.io/v1/user", {
-      headers: { "xi-api-key": specificKey },
-    });
+  let apiKey = specificKey;
 
-    if (!userResponse.ok) {
-      const errorText = await userResponse.text();
-      console.error(`ElevenLabs verification failed: ${userResponse.status} - ${errorText}`);
+  if (!apiKey) {
+    // Get first active key
+    const { data: keyData } = await supabase
+      .from("elevenlabs_keys")
+      .select("api_key")
+      .eq("is_active", true)
+      .order("usage_count", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+
+    if (!keyData) {
       return new Response(
-        JSON.stringify({ 
-          valid: false, 
-          error: `Invalid API key (${userResponse.status})`,
-          details: errorText.slice(0, 200)
-        }),
+        JSON.stringify({ valid: false, error: "No ElevenLabs key found" }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    const userData = await userResponse.json();
+    apiKey = keyData.api_key;
+  }
+
+  // Verify by getting user info
+  const userResponse = await fetch("https://api.elevenlabs.io/v1/user", {
+    headers: { "xi-api-key": apiKey! },
+  });
+
+  if (!userResponse.ok) {
     return new Response(
-      JSON.stringify({
-        valid: true,
-        account_info: {
-          id: userData.user_id,
-          name: userData.first_name || userData.user_id,
-          subscription: userData.subscription?.tier,
-          character_count: userData.subscription?.character_count,
-          character_limit: userData.subscription?.character_limit,
-        },
-      }),
+      JSON.stringify({ valid: false, error: "Invalid API key" }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 
-  // No specific key - try all active keys until one works
-  const { data: keys } = await supabase
-    .from("elevenlabs_keys")
-    .select("*")
-    .eq("is_active", true)
-    .order("usage_count", { ascending: true });
+  const userData = await userResponse.json();
 
-  if (!keys || keys.length === 0) {
-    return new Response(
-      JSON.stringify({ valid: false, error: "No active ElevenLabs keys found" }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
-  }
-
-  const errors: string[] = [];
-  
-  // Try each key until one succeeds
-  for (const keyData of keys) {
-    try {
-      const userResponse = await fetch("https://api.elevenlabs.io/v1/user", {
-        headers: { "xi-api-key": keyData.api_key },
-      });
-
-      if (userResponse.ok) {
-        const userData = await userResponse.json();
-        console.log(`✅ Verified ElevenLabs key: ${keyData.name}`);
-        
-        return new Response(
-          JSON.stringify({
-            valid: true,
-            account_info: {
-              id: userData.user_id,
-              name: userData.first_name || userData.user_id,
-              subscription: userData.subscription?.tier,
-              character_count: userData.subscription?.character_count,
-              character_limit: userData.subscription?.character_limit,
-              key_name: keyData.name, // Show which key was verified
-            },
-          }),
-          { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-
-      // Key failed
-      const errorText = await userResponse.text();
-      console.warn(`❌ Key ${keyData.name} failed: ${userResponse.status}`);
-      errors.push(`${keyData.name}: ${userResponse.status}`);
-      
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`⚠️ Error testing key ${keyData.name}: ${msg}`);
-      errors.push(`${keyData.name}: ${msg}`);
-    }
-  }
-
-  // All keys failed
   return new Response(
-    JSON.stringify({ 
-      valid: false, 
-      error: `All ${keys.length} keys failed verification`,
-      details: errors.join("; ")
+    JSON.stringify({
+      valid: true,
+      account_info: {
+        id: userData.user_id,
+        name: userData.first_name || userData.user_id,
+        subscription: userData.subscription?.tier,
+        character_count: userData.subscription?.character_count,
+        character_limit: userData.subscription?.character_limit,
+      },
     }),
     { headers: { ...corsHeaders, "Content-Type": "application/json" } }
   );
