@@ -52,117 +52,73 @@ function isHtmlErrorResponse(text: string): boolean {
 }
 
 /**
- * Quick health check – returns detailed status object.
- */
-export async function checkFFmpegSpaceHealth(): Promise<{
-  healthy: boolean;
-  status: number;
-  response?: any;
-  error?: string;
-  errorType?: 'network' | 'timeout' | 'http' | 'parse' | 'unknown';
-}> {
-  const endpoints = ['/', '/health'];
-  
-  for (const endpoint of endpoints) {
-    try {
-      console.log(`[Health Check] Checking ${HF_SPACE_URL}${endpoint}`);
-      
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 15000);
-
-      const resp = await fetch(`${HF_SPACE_URL}${endpoint}`, {
-        method: "GET",
-        signal: ctrl.signal,
-      });
-      clearTimeout(timer);
-
-      const text = await resp.text();
-      console.log(`[Health Check] Response from ${endpoint}: HTTP ${resp.status}`);
-      
-      // محاولة parse الاستجابة
-      let jsonResponse;
-      try {
-        jsonResponse = JSON.parse(text);
-      } catch {
-        jsonResponse = null;
-      }
-
-      // إذا كان الرد HTML error page
-      if (isHtmlErrorResponse(text)) {
-        return {
-          healthy: false,
-          status: resp.status,
-          error: `السيرفر أرجع صفحة HTML خطأ بدلاً من JSON. قد يكون السيرفر معطل أو غير مهيأ بشكل صحيح.`,
-          errorType: 'http',
-          response: text.slice(0, 200)
-        };
-      }
-
-      // إذا كان الرد ناجح
-      if (resp.ok || resp.status === 405) {
-        return {
-          healthy: true,
-          status: resp.status,
-          response: jsonResponse || text
-        };
-      }
-
-      // ردود HTTP error
-      return {
-        healthy: false,
-        status: resp.status,
-        error: `HTTP Error ${resp.status}: ${text.slice(0, 200)}`,
-        errorType: 'http',
-        response: jsonResponse || text.slice(0, 200)
-      };
-      
-    } catch (error) {
-      console.error(`[Health Check] Error checking ${endpoint}:`, error);
-      
-      if (error instanceof Error) {
-        if (error.name === 'AbortError') {
-          return {
-            healthy: false,
-            status: 0,
-            error: `انتهى وقت الانتظار (15 ثانية). السيرفر لا يستجيب.`,
-            errorType: 'timeout'
-          };
-        }
-        
-        if (error.message.includes('fetch failed') || error.message.includes('ENOTFOUND')) {
-          return {
-            healthy: false,
-            status: 0,
-            error: `لا يمكن الاتصال بالسيرفر. تأكد من أن:
-1. السيرفر يعمل على Hugging Face
-2. الرابط صحيح: ${HF_SPACE_URL}
-3. السيرفر ليس في وضع "Sleeping"
-
-تفاصيل الخطأ: ${error.message}`,
-            errorType: 'network'
-          };
-        }
-      }
-      
-      // استمر للـ endpoint التالي
-      continue;
-    }
-  }
-  
-  return {
-    healthy: false,
-    status: 0,
-    error: `فشلت جميع محاولات التحقق من السيرفر.`,
-    errorType: 'unknown'
-  };
-}
-
-/**
- * Legacy health check - returns boolean only
+ * Quick health check – returns true if the FFmpeg Space is reachable.
  */
 export async function isFFmpegSpaceHealthy(): Promise<boolean> {
-  const result = await checkFFmpegSpaceHealth();
-  return result.healthy;
+  try {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("🔍 فحص صحة السيرفر");
+    console.log(`📍 URL: ${HF_SPACE_URL}`);
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+      console.log("⏱️ انتهى وقت الانتظار (10 ثوانٍ)");
+      ctrl.abort();
+    }, 10000);
+
+    const startTime = Date.now();
+    const resp = await fetch(HF_SPACE_URL, {
+      method: "GET",
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    
+    const duration = Date.now() - startTime;
+
+    console.log(`✅ استجابة السيرفر:`);
+    console.log(`   - Status Code: ${resp.status}`);
+    console.log(`   - Status Text: ${resp.statusText}`);
+    console.log(`   - وقت الاستجابة: ${duration}ms`);
+    console.log(`   - Headers:`, Object.fromEntries(resp.headers.entries()));
+    
+    // محاولة قراءة الـ body
+    const bodyText = await resp.text();
+    console.log(`   - Response Body (first 200 chars): ${bodyText.slice(0, 200)}`);
+    
+    const isHealthy = resp.ok || resp.status === 405 || resp.status === 301 || resp.status === 302;
+    
+    if (isHealthy) {
+      console.log("✅ السيرفر يعمل بشكل صحيح");
+    } else {
+      console.log(`❌ السيرفر يرجع خطأ: ${resp.status}`);
+    }
+    
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    
+    return isHealthy;
+  } catch (error) {
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("❌ فشل فحص صحة السيرفر");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.error("تفاصيل الخطأ:", {
+      name: error instanceof Error ? error.name : "Unknown",
+      message: error instanceof Error ? error.message : String(error),
+      cause: error instanceof Error ? error.cause : undefined,
+    });
+    
+    if (error instanceof Error && error.name === "AbortError") {
+      console.log("⏱️ السبب: انتهى وقت الانتظار - السيرفر بطيء جداً أو لا يستجيب");
+    } else if (error instanceof TypeError) {
+      console.log("🌐 السبب: خطأ في الاتصال بالشبكة - تحقق من:");
+      console.log("   1. اتصال الإنترنت");
+      console.log("   2. صحة الـ URL");
+      console.log("   3. السيرفر قد يكون متوقف");
+    }
+    
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    return false;
+  }
 }
 
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
@@ -206,12 +162,11 @@ export interface MergeMediaResponse {
   error?: string;
   job_id?: string;
   message?: string;
-  debug?: any;
 }
 
 /**
  * Starts a merge job on the FFmpeg Space and returns the *initial* response (no polling).
- * Includes a detailed health check to fail fast if the server is down.
+ * Includes a health check to fail fast if the server is down.
  */
 export async function startMergeWithFFmpeg(
   request: MergeMediaRequest
@@ -224,26 +179,34 @@ export async function startMergeWithFFmpeg(
   }
 
   // Health check – fail fast instead of hanging
-  console.log("[startMergeWithFFmpeg] Performing health check before merge...");
-  const healthCheck = await checkFFmpegSpaceHealth();
+  console.log("\n🔍 بدء فحص صحة السيرفر قبل عملية الدمج...\n");
+  const healthy = await isFFmpegSpaceHealthy();
   
-  if (!healthCheck.healthy) {
-    console.error("[startMergeWithFFmpeg] Health check failed:", healthCheck);
-    
-    let errorMessage = "سيرفر الدمج (FFmpeg Space) غير متاح حالياً.";
-    
-    if (healthCheck.errorType === 'network') {
-      errorMessage = `❌ مشكلة في الاتصال بالسيرفر:\n${healthCheck.error}\n\n💡 الحلول المقترحة:\n1. تأكد من أن السيرفر يعمل على Hugging Face\n2. قم بإعادة تشغيل السيرفر من لوحة تحكم Hugging Face\n3. تحقق من أن الرابط صحيح: ${HF_SPACE_URL}`;
-    } else if (healthCheck.errorType === 'timeout') {
-      errorMessage = `⏱️ انتهى وقت الانتظار. السيرفر بطيء أو غير مستجيب.\n\n💡 جرب:\n1. الانتظار دقيقة ثم المحاولة مرة أخرى\n2. إعادة تشغيل السيرفر`;
-    } else if (healthCheck.errorType === 'http') {
-      errorMessage = `🚫 السيرفر أرجع خطأ HTTP ${healthCheck.status}.\n\n💡 قد يكون:\n- السيرفر في وضع "Sleeping" على Hugging Face\n- هناك خطأ في إعدادات السيرفر\n- السيرفر يحتاج لإعادة تشغيل`;
-    }
-    
-    throw new Error(errorMessage);
-  }
+  if (!healthy) {
+    const errorMsg = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ سيرفر الدمج غير متاح
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  console.log("[startMergeWithFFmpeg] Health check passed, sending merge request...");
+السيرفر المستهدف: ${HF_SPACE_URL}
+
+الأسباب المحتملة:
+1. السيرفر متوقف أو في وضع Sleep على Hugging Face
+2. مشكلة في الاتصال بالإنترنت
+3. الـ URL خاطئ
+4. السيرفر يحتاج وقت للاستيقاظ (cold start)
+
+الحلول المقترحة:
+1. افتح الرابط في المتصفح: ${HF_SPACE_URL}
+2. انتظر دقيقة حتى يستيقظ السيرفر
+3. تأكد من أن Space مفعّل على Hugging Face
+4. جرب مرة أخرى بعد قليل
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+    console.error(errorMsg);
+    throw new Error("سيرفر الدمج (FFmpeg Space) غير متاح حالياً. يرجى المحاولة لاحقاً.");
+  }
 
   const payload = {
     imageUrl,
@@ -254,12 +217,15 @@ export async function startMergeWithFFmpeg(
     output_format: request.output_format || "mp4",
   };
 
-  const targetUrl = `${HF_SPACE_URL}/merge`;
-  console.log("[startMergeWithFFmpeg] Target URL:", targetUrl);
-  console.log("[startMergeWithFFmpeg] Payload:", JSON.stringify(payload, null, 2));
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("📤 إرسال طلب الدمج");
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("Target URL:", `${HF_SPACE_URL}/merge`);
+  console.log("Payload:", JSON.stringify(payload, null, 2));
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
   try {
-    const response = await fetch(targetUrl, {
+    const response = await fetch(`${HF_SPACE_URL}/merge`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${HF_READ_TOKEN}`,
@@ -269,25 +235,77 @@ export async function startMergeWithFFmpeg(
     });
 
     const responseText = await response.text();
-    console.log("[startMergeWithFFmpeg] Raw response:", responseText.slice(0, 500));
+    
+    console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("📥 استجابة السيرفر");
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    console.log("Status:", response.status, response.statusText);
+    console.log("Headers:", Object.fromEntries(response.headers.entries()));
+    console.log("Body (first 500 chars):", responseText.slice(0, 500));
+    console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Detect HTML error pages
     if (isHtmlErrorResponse(responseText)) {
-      throw new Error(`🚫 السيرفر أرجع صفحة خطأ HTML (HTTP ${response.status}).\n\n💡 هذا يعني:\n- السيرفر قد يكون في وضع "Sleeping"\n- أو هناك خطأ في إعدادات السيرفر\n- جرب زيارة ${HF_SPACE_URL} مباشرة للتحقق`);
+      const errorMsg = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ السيرفر أرجع صفحة HTML بدلاً من JSON
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Status Code: ${response.status}
+Response: ${responseText.slice(0, 300)}
+
+السبب المحتمل:
+- المسار /merge غير موجود على السيرفر
+- السيرفر لم يتم إعداده بشكل صحيح
+- الـ endpoint المطلوب غير متوفر
+
+الحل المقترح:
+- تحقق من كود السيرفر في server.js
+- تأكد من أن المسار /merge موجود
+- راجع logs السيرفر على Hugging Face
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+      console.error(errorMsg);
+      throw new Error(`سيرفر الدمج أرجع صفحة خطأ (HTTP ${response.status}). السيرفر قد يكون معطل.`);
     }
 
     if (!response.ok) {
-      throw new Error(`❌ خطأ من FFmpeg Space (HTTP ${response.status}):\n${responseText.slice(0, 300)}`);
+      const errorMsg = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ خطأ من السيرفر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Status: ${response.status} ${response.statusText}
+Response: ${responseText}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+      console.error(errorMsg);
+      throw new Error(`FFmpeg Space error (${response.status}): ${responseText}`);
     }
 
     let rawResult: any;
     try {
       rawResult = JSON.parse(responseText);
-    } catch {
-      throw new Error(`❌ الاستجابة ليست JSON صالح:\n${responseText.slice(0, 200)}`);
+    } catch (parseError) {
+      const errorMsg = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ استجابة غير صالحة من السيرفر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+السيرفر أرجع نص ليس بصيغة JSON:
+${responseText.slice(0, 300)}
+
+Parse Error: ${parseError instanceof Error ? parseError.message : String(parseError)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+      console.error(errorMsg);
+      throw new Error(`FFmpeg Space returned invalid JSON: ${responseText.slice(0, 200)}`);
     }
 
-    console.log("[startMergeWithFFmpeg] Parsed response:", JSON.stringify(rawResult, null, 2));
+    console.log("✅ تم تحليل استجابة السيرفر بنجاح:", JSON.stringify(rawResult, null, 2));
 
     return {
       status: rawResult.status || "processing",
@@ -296,25 +314,28 @@ export async function startMergeWithFFmpeg(
       error: rawResult.error,
       job_id: extractJobId(rawResult),
       message: rawResult.message,
-      debug: { rawResponse: rawResult }
     };
-    
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith('❌')) {
-      throw error; // Re-throw our formatted errors
-    }
-    
-    console.error("[startMergeWithFFmpeg] Fetch error:", error);
-    
-    if (error instanceof Error) {
-      if (error.name === 'AbortError') {
-        throw new Error(`⏱️ انتهى وقت الانتظار أثناء إرسال طلب الدمج.\n\n💡 السيرفر قد يكون مشغولاً أو بطيئاً.`);
-      }
-      
-      throw new Error(`❌ فشل الاتصال بالسيرفر:\n${error.message}\n\n💡 تأكد من:\n1. أن السيرفر يعمل: ${HF_SPACE_URL}\n2. أن الرمز (Token) صحيح\n3. أن السيرفر ليس في وضع Sleeping`);
-    }
-    
-    throw error;
+  } catch (fetchError) {
+    const errorMsg = `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+❌ فشل الاتصال بالسيرفر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Error Type: ${fetchError instanceof Error ? fetchError.name : "Unknown"}
+Error Message: ${fetchError instanceof Error ? fetchError.message : String(fetchError)}
+
+Target URL: ${HF_SPACE_URL}/merge
+
+الأسباب المحتملة:
+1. مشكلة في الشبكة
+2. السيرفر متوقف
+3. CORS issue
+4. Timeout
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`;
+    console.error(errorMsg);
+    throw fetchError;
   }
 }
 
@@ -337,77 +358,72 @@ export async function mergeMediaWithFFmpeg(
     output_format: request.output_format || "mp4",
   };
 
-  console.log("[mergeMediaWithFFmpeg] Sending to FFmpeg Space:", JSON.stringify(payload, null, 2));
-  console.log("[mergeMediaWithFFmpeg] Target URL:", `${HF_SPACE_URL}/merge`);
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("📤 إرسال طلب الدمج (مع Polling)");
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("Target URL:", `${HF_SPACE_URL}/merge`);
+  console.log("Payload:", JSON.stringify(payload, null, 2));
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-  try {
-    const response = await fetch(`${HF_SPACE_URL}/merge`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HF_READ_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+  const response = await fetch(`${HF_SPACE_URL}/merge`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${HF_READ_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
 
-    const responseText = await response.text();
-    console.log("[mergeMediaWithFFmpeg] Raw response:", responseText.slice(0, 500));
+  const responseText = await response.text();
+  
+  console.log("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("📥 استجابة السيرفر");
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+  console.log("Status:", response.status, response.statusText);
+  console.log("Body (first 500 chars):", responseText.slice(0, 500));
+  console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    if (isHtmlErrorResponse(responseText)) {
-      throw new Error(`🚫 السيرفر أرجع صفحة خطأ HTML (HTTP ${response.status}).\n\n💡 هذا يعني أن السيرفر قد يكون معطلاً أو في وضع Sleeping.`);
-    }
-
-    if (!response.ok) {
-      throw new Error(`❌ خطأ من FFmpeg Space (HTTP ${response.status}):\n${responseText.slice(0, 300)}`);
-    }
-
-    let rawResult: any;
-    try {
-      rawResult = JSON.parse(responseText);
-    } catch {
-      throw new Error(`❌ الاستجابة ليست JSON صالح:\n${responseText.slice(0, 200)}`);
-    }
-
-    console.log("[mergeMediaWithFFmpeg] Parsed response:", JSON.stringify(rawResult, null, 2));
-
-    const result: MergeMediaResponse = {
-      status: rawResult.status || "processing",
-      progress: rawResult.progress ?? 0,
-      output_url: extractOutputUrl(rawResult),
-      error: rawResult.error,
-      job_id: extractJobId(rawResult),
-      message: rawResult.message,
-    };
-
-    if (result.job_id && result.status === "processing") {
-      console.log(`[mergeMediaWithFFmpeg] Job started with ID: ${result.job_id}, polling for completion...`);
-      return await pollForMergeCompletion(result);
-    }
-
-    if (result.status === "completed" || result.status === "failed") {
-      return result;
-    }
-
-    if (result.status === "processing") {
-      console.log("[mergeMediaWithFFmpeg] Merge started without job_id, polling for completion...");
-      return await pollForMergeCompletion(result);
-    }
-
-    return result;
-    
-  } catch (error) {
-    if (error instanceof Error && (error.message.startsWith('🚫') || error.message.startsWith('❌'))) {
-      throw error;
-    }
-    
-    console.error("[mergeMediaWithFFmpeg] Error:", error);
-    
-    if (error instanceof Error) {
-      throw new Error(`❌ فشل في mergeMediaWithFFmpeg:\n${error.message}`);
-    }
-    
-    throw error;
+  if (isHtmlErrorResponse(responseText)) {
+    throw new Error(`سيرفر الدمج أرجع صفحة خطأ (HTTP ${response.status}). السيرفر قد يكون معطل.`);
   }
+
+  if (!response.ok) {
+    throw new Error(`FFmpeg Space error: ${responseText}`);
+  }
+
+  let rawResult: any;
+  try {
+    rawResult = JSON.parse(responseText);
+  } catch {
+    throw new Error(`FFmpeg Space returned invalid JSON: ${responseText.slice(0, 200)}`);
+  }
+
+  console.log("FFmpeg Space initial response:", JSON.stringify(rawResult));
+
+  const result: MergeMediaResponse = {
+    status: rawResult.status || "processing",
+    progress: rawResult.progress ?? 0,
+    output_url: extractOutputUrl(rawResult),
+    error: rawResult.error,
+    job_id: extractJobId(rawResult),
+    message: rawResult.message,
+  };
+
+  if (result.job_id && result.status === "processing") {
+    console.log(`Merge job started with ID: ${result.job_id}, polling for completion...`);
+    return await pollForMergeCompletion(result);
+  }
+
+  if (result.status === "completed" || result.status === "failed") {
+    return result;
+  }
+
+  if (result.status === "processing") {
+    console.log("Merge started without job_id, polling for completion...");
+    return await pollForMergeCompletion(result);
+  }
+
+  return result;
 }
 
 async function pollForMergeCompletion(
@@ -422,21 +438,19 @@ async function pollForMergeCompletion(
   const jobId = result.job_id;
 
   if (!jobId) {
-    console.log("[pollForMergeCompletion] No job_id available for polling");
+    console.log("No job_id available for polling");
     return result;
   }
 
-  console.log(`[pollForMergeCompletion] Starting polling for job ${jobId}`);
-
   while (result.status === "processing" && attempts < maxAttempts) {
     attempts++;
-    console.log(`[pollForMergeCompletion] Polling attempt ${attempts}/${maxAttempts} for job ${jobId}`);
+    console.log(`Polling merge status for job ${jobId}... attempt ${attempts}/${maxAttempts}`);
 
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
     try {
       const status = await checkMergeStatus(jobId);
-      consecutiveFailures = 0;
+      consecutiveFailures = 0; // Reset on success
 
       result = {
         ...result,
@@ -448,17 +462,18 @@ async function pollForMergeCompletion(
 
       if (result.output_url && result.output_url.startsWith("http")) {
         result.status = "completed";
-        console.log(`[pollForMergeCompletion] Merge completed! Output URL: ${result.output_url}`);
+        console.log(`Merge completed with output URL: ${result.output_url}`);
       }
     } catch (pollError) {
       consecutiveFailures++;
-      console.error(`[pollForMergeCompletion] Poll attempt ${attempts} failed (consecutive: ${consecutiveFailures}):`, pollError);
+      console.error(`Poll attempt ${attempts} failed (consecutive: ${consecutiveFailures}):`, pollError);
 
+      // If 10 consecutive failures, the server is likely down
       if (consecutiveFailures >= 10) {
         return {
           status: "failed",
           progress: result.progress,
-          error: `❌ سيرفر الدمج لا يستجيب بعد 10 محاولات متتالية فاشلة.\n\n💡 جرب:\n1. إعادة تشغيل السيرفر\n2. الانتظار قليلاً ثم المحاولة مرة أخرى`,
+          error: "سيرفر الدمج لا يستجيب بعد 10 محاولات متتالية فاشلة",
         };
       }
     }
@@ -468,7 +483,7 @@ async function pollForMergeCompletion(
     return {
       status: "failed",
       progress: result.progress,
-      error: `⏱️ انتهى وقت انتظار عملية الدمج (${maxAttempts * pollInterval / 1000} ثانية).\n\n💡 قد يكون السيرفر مشغولاً أو الملفات كبيرة جداً.`,
+      error: "Merge timeout: Operation took too long",
     };
   }
 
@@ -476,24 +491,21 @@ async function pollForMergeCompletion(
 }
 
 /**
- * Check the status of a merge job. Tries multiple endpoints.
+ * Check the status of a merge job. Tries only the most reliable endpoints.
  * Detects HTML error pages and counts them as failures.
  */
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
   const candidates = [
+    { method: "GET" as const, url: `${HF_SPACE_URL}/job-status/${jobId}` },
     { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}` },
     { method: "GET" as const, url: `${HF_SPACE_URL}/merge/status/${jobId}` },
     { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId } },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/job-status/${jobId}` },
   ];
 
   let lastErr: string | undefined;
-  let allErrors: string[] = [];
 
   for (const c of candidates) {
     try {
-      console.log(`[checkMergeStatus] Trying ${c.method} ${c.url}`);
-      
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 15000);
 
@@ -513,18 +525,12 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
 
       // Detect HTML error pages
       if (isHtmlErrorResponse(text)) {
-        const err = `HTML error page from ${c.method} ${c.url}`;
-        console.log(`[checkMergeStatus] ${err}`);
-        allErrors.push(err);
-        lastErr = err;
+        lastErr = `HTML error page from ${c.method} ${c.url}: ${text.slice(0, 100)}`;
         continue;
       }
 
       if (!resp.ok) {
-        const err = `HTTP ${resp.status} from ${c.method} ${c.url}: ${text.slice(0, 200)}`;
-        console.log(`[checkMergeStatus] ${err}`);
-        allErrors.push(err);
-        lastErr = err;
+        lastErr = `HTTP ${resp.status} from ${c.method} ${c.url}: ${text.slice(0, 200)}`;
         continue;
       }
 
@@ -532,14 +538,9 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
       try {
         raw = JSON.parse(text);
       } catch {
-        const err = `Invalid JSON from ${c.method} ${c.url}: ${text.slice(0, 100)}`;
-        console.log(`[checkMergeStatus] ${err}`);
-        allErrors.push(err);
-        lastErr = err;
+        lastErr = `Invalid JSON from ${c.method} ${c.url}: ${text.slice(0, 100)}`;
         continue;
       }
-
-      console.log(`[checkMergeStatus] Success with ${c.method} ${c.url}:`, JSON.stringify(raw, null, 2));
 
       return {
         status: raw.status || "processing",
@@ -550,13 +551,9 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         message: raw.message,
       };
     } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      console.log(`[checkMergeStatus] Error from ${c.method} ${c.url}: ${errMsg}`);
-      allErrors.push(`${c.method} ${c.url}: ${errMsg}`);
-      lastErr = errMsg;
+      lastErr = e instanceof Error ? e.message : String(e);
     }
   }
 
-  console.error(`[checkMergeStatus] All candidates failed. Errors:\n${allErrors.join('\n')}`);
-  throw new Error(`❌ فشل التحقق من حالة المهمة.\n\nالمحاولات الفاشلة:\n${allErrors.map(e => `• ${e}`).join('\n')}`);
+  throw new Error(lastErr || "Status check error: all candidates failed");
 }
