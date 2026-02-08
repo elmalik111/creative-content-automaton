@@ -27,29 +27,91 @@ async function getActiveKeys(): Promise<ElevenLabsKey[]> {
 }
 
 /**
+ * Reactivate a specific key (useful if it was deactivated by mistake)
+ */
+export async function reactivateKey(keyId: string): Promise<void> {
+  const { error } = await supabase
+    .from("elevenlabs_keys")
+    .update({ is_active: true })
+    .eq("id", keyId);
+
+  if (error) {
+    console.error("Error reactivating key:", error);
+    throw error;
+  }
+  
+  console.log(`✅ Key ${keyId} has been reactivated`);
+}
+
+/**
+ * Reactivate all deactivated keys (use with caution!)
+ */
+export async function reactivateAllKeys(): Promise<void> {
+  const { error } = await supabase
+    .from("elevenlabs_keys")
+    .update({ is_active: true })
+    .eq("is_active", false);
+
+  if (error) {
+    console.error("Error reactivating keys:", error);
+    throw error;
+  }
+  
+  console.log(`✅ All keys have been reactivated`);
+}
+
+/**
  * Determine whether an error should permanently deactivate the key.
  */
 function shouldDeactivateKey(status: number, errorText: string): boolean {
   const lower = errorText.toLowerCase();
-  // Only deactivate on clear permanent blocks
-  return (
+  
+  // Only deactivate on VERY specific permanent errors
+  const isPermanentError = (
+    // Invalid API key - must have explicit "invalid" message
+    (status === 401 && (
+      lower.includes("invalid_api_key") ||
+      lower.includes("invalid api key") ||
+      lower.includes("api key is invalid") ||
+      (lower.includes("unauthorized") && lower.includes("invalid"))
+    )) ||
+    // Account suspended or unusual activity
     lower.includes("detected_unusual_activity") ||
-    lower.includes("quota_exceeded") ||
-    lower.includes("invalid_api_key") ||
-    lower.includes("api key is invalid")
+    lower.includes("account suspended") ||
+    lower.includes("account has been suspended")
   );
+  
+  // Log deactivation decision for debugging
+  if (isPermanentError) {
+    console.warn(`[shouldDeactivateKey] 🔒 سيتم تعطيل المفتاح - Status: ${status}, Error: ${errorText.slice(0, 200)}`);
+  } else {
+    console.log(`[shouldDeactivateKey] ✓ لن يتم تعطيل المفتاح - Status: ${status}`);
+  }
+  
+  return isPermanentError;
 }
 
 /**
  * Determine whether the error is retryable with a different key.
  */
 function isRetryableError(status: number, errorText: string): boolean {
-  // 401 without permanent block = try another key
-  if (status === 401) return true;
-  // Server errors = transient
-  if (status >= 500) return true;
-  // Rate limiting
+  const lower = errorText.toLowerCase();
+  
+  // Rate limiting - definitely retry with next key
   if (status === 429) return true;
+  
+  // Quota exceeded - try next key (DON'T deactivate permanently!)
+  if (lower.includes("quota_exceeded") || 
+      lower.includes("quota exceeded") ||
+      lower.includes("insufficient quota") ||
+      lower.includes("character limit")) return true;
+  
+  // Server errors - transient issues
+  if (status >= 500) return true;
+  
+  // 401 errors that DON'T explicitly say "invalid" - could be temporary
+  if (status === 401 && !lower.includes("invalid")) return true;
+  
   return false;
 }
 
