@@ -1,6 +1,6 @@
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
-// Use ff.hf.space as the primary merge endpoint
-const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://ff.hf.space";
+// استخدام السيرفر الصحيح
+const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 
 function normalizeMaybeUrl(raw?: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
@@ -56,18 +56,23 @@ function isHtmlErrorResponse(text: string): boolean {
  */
 export async function isFFmpegSpaceHealthy(): Promise<boolean> {
   try {
+    console.log(`Checking FFmpeg Space health at: ${HF_SPACE_URL}`);
+    
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const timer = setTimeout(() => ctrl.abort(), 10000); // زيادة وقت الانتظار إلى 10 ثوانٍ
 
     const resp = await fetch(HF_SPACE_URL, {
-      method: "HEAD",
+      method: "GET", // تغيير من HEAD إلى GET لأن بعض السيرفرات لا تدعم HEAD
       signal: ctrl.signal,
     });
     clearTimeout(timer);
 
-    // 404 means the Space is down / not deployed
-    return resp.ok || resp.status === 405; // 405 = Method Not Allowed is fine (server exists)
-  } catch {
+    console.log(`Health check response: ${resp.status}`);
+    
+    // قبول أي استجابة ليست 404 أو 502 أو 503
+    return resp.ok || resp.status === 405 || resp.status === 301 || resp.status === 302;
+  } catch (error) {
+    console.error("Health check failed:", error);
     return false;
   }
 }
@@ -130,8 +135,10 @@ export async function startMergeWithFFmpeg(
   }
 
   // Health check – fail fast instead of hanging
+  console.log("Performing health check before merge...");
   const healthy = await isFFmpegSpaceHealthy();
   if (!healthy) {
+    console.error(`FFmpeg Space (${HF_SPACE_URL}) appears to be down`);
     throw new Error("سيرفر الدمج (FFmpeg Space) غير متاح حالياً. يرجى المحاولة لاحقاً.");
   }
 
@@ -145,6 +152,7 @@ export async function startMergeWithFFmpeg(
   };
 
   console.log("Sending to FFmpeg Space:", JSON.stringify(payload));
+  console.log("Target URL:", `${HF_SPACE_URL}/merge`);
 
   const response = await fetch(`${HF_SPACE_URL}/merge`, {
     method: "POST",
@@ -156,6 +164,7 @@ export async function startMergeWithFFmpeg(
   });
 
   const responseText = await response.text();
+  console.log("FFmpeg Space raw response:", responseText.slice(0, 500));
 
   // Detect HTML error pages
   if (isHtmlErrorResponse(responseText)) {
@@ -205,6 +214,7 @@ export async function mergeMediaWithFFmpeg(
   };
 
   console.log("Sending to FFmpeg Space:", JSON.stringify(payload));
+  console.log("Target URL:", `${HF_SPACE_URL}/merge`);
 
   const response = await fetch(`${HF_SPACE_URL}/merge`, {
     method: "POST",
@@ -216,6 +226,7 @@ export async function mergeMediaWithFFmpeg(
   });
 
   const responseText = await response.text();
+  console.log("FFmpeg Space raw response:", responseText.slice(0, 500));
 
   if (isHtmlErrorResponse(responseText)) {
     throw new Error(`سيرفر الدمج أرجع صفحة خطأ (HTTP ${response.status}). السيرفر قد يكون معطل.`);
