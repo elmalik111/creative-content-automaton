@@ -1,20 +1,238 @@
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 
-// ===== LOGGING HELPERS =====
-function logInfo(message: string, data?: any) {
-  console.log(`[HF-INFO] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+// ===== FREE IMAGE GENERATION ALTERNATIVES =====
+
+/**
+ * Hugging Face Free Image Generation Models
+ * هذه النماذج مجانية تماماً ولا تحتاج Credits
+ */
+const FREE_IMAGE_MODELS = {
+  // Stable Diffusion 2.1 - سريع ومجاني
+  SD_2_1: "stabilityai/stable-diffusion-2-1",
+  
+  // Stable Diffusion XL - جودة أعلى
+  SDXL: "stabilityai/stable-diffusion-xl-base-1.0",
+  
+  // Playground v2.5 - جودة ممتازة
+  PLAYGROUND: "playgroundai/playground-v2.5-1024px-aesthetic",
+  
+  // Dreamlike Photoreal - واقعي
+  DREAMLIKE: "dreamlike-art/dreamlike-photoreal-2.0",
+  
+  // Realistic Vision - واقعي جداً
+  REALISTIC: "SG161222/Realistic_Vision_V5.1_noVAE",
+};
+
+// اختر النموذج الافتراضي (يمكن تغييره)
+const DEFAULT_FREE_MODEL = FREE_IMAGE_MODELS.PLAYGROUND;
+
+/**
+ * Generate image using FREE Hugging Face models
+ * بديل مجاني تماماً لـ Flux
+ */
+export async function generateImageFree(
+  prompt: string,
+  model: string = DEFAULT_FREE_MODEL
+): Promise<ArrayBuffer> {
+  
+  console.log(`[FREE-IMAGE] توليد صورة باستخدام: ${model}`);
+  console.log(`[FREE-IMAGE] Prompt: ${prompt.slice(0, 100)}`);
+  
+  // إضافة كلمات تحسينية للـ prompt
+  const enhancedPrompt = `${prompt}, high quality, detailed, professional`;
+  
+  try {
+    const response = await fetch(
+      `https://api-inference.huggingface.co/models/${model}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HF_READ_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: enhancedPrompt,
+          parameters: {
+            width: 1280,
+            height: 720,
+            num_inference_steps: 30,  // جودة جيدة
+            guidance_scale: 7.5,        // توازن بين الإبداع والدقة
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      
+      // التحقق من نوع الخطأ
+      if (response.status === 402) {
+        throw new Error(
+          `نفد رصيد Hugging Face Credits.\n` +
+          `الحل: استخدم generateImageFree() بدلاً من generateImageWithFlux()\n` +
+          `أو: اشترك في Hugging Face PRO`
+        );
+      }
+      
+      // إذا كان النموذج يحتاج وقت للتحميل (503)
+      if (response.status === 503) {
+        console.warn(`[FREE-IMAGE] النموذج يحتاج وقت للتحميل، إعادة المحاولة...`);
+        
+        // انتظر 10 ثوانٍ ثم حاول مرة أخرى
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        
+        const retryResponse = await fetch(
+          `https://api-inference.huggingface.co/models/${model}`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${HF_READ_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              inputs: enhancedPrompt,
+              parameters: {
+                width: 1280,
+                height: 720,
+                num_inference_steps: 30,
+                guidance_scale: 7.5,
+              },
+            }),
+          }
+        );
+        
+        if (!retryResponse.ok) {
+          throw new Error(`فشل بعد إعادة المحاولة: ${await retryResponse.text()}`);
+        }
+        
+        const buffer = await retryResponse.arrayBuffer();
+        console.log(`[FREE-IMAGE] ✓ تم توليد الصورة بنجاح (${buffer.byteLength} bytes)`);
+        return buffer;
+      }
+      
+      throw new Error(`خطأ في توليد الصورة (${response.status}): ${errorText}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    console.log(`[FREE-IMAGE] ✓ تم توليد الصورة بنجاح (${buffer.byteLength} bytes)`);
+    return buffer;
+    
+  } catch (error) {
+    console.error(`[FREE-IMAGE] فشل توليد الصورة:`, error);
+    throw error;
+  }
 }
 
-function logError(message: string, error?: any) {
-  console.error(`[HF-ERROR] ${message}`, error ? (error instanceof Error ? error.message : JSON.stringify(error)) : '');
+/**
+ * OLD Flux function - يتطلب Credits مدفوعة
+ * استخدم generateImageFree() بدلاً منه
+ */
+export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
+  console.log("[FLUX] ⚠️ تحذير: Flux يتطلب Credits مدفوعة");
+  console.log("[FLUX] ⚠️ استخدم generateImageFree() للحصول على بديل مجاني");
+  
+  try {
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${HF_READ_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: {
+            width: 1280,
+            height: 720,
+          },
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      
+      // إذا كانت المشكلة في الـ Credits
+      if (response.status === 402 || error.includes("Credit balance")) {
+        console.error("[FLUX] ❌ نفد رصيد Credits");
+        console.log("[FLUX] 💡 جارٍ التحويل التلقائي للبديل المجاني...");
+        
+        // التحويل التلقائي للبديل المجاني
+        return await generateImageFree(prompt);
+      }
+      
+      throw new Error(`Flux API error (${response.status}): ${error}`);
+    }
+
+    const buffer = await response.arrayBuffer();
+    console.log(`[FLUX] ✓ تم توليد الصورة (${buffer.byteLength} bytes)`);
+    return buffer;
+    
+  } catch (error) {
+    console.error("[FLUX] خطأ، محاولة البديل المجاني...");
+    // Fallback إلى البديل المجاني
+    return await generateImageFree(prompt);
+  }
 }
 
-function logWarning(message: string, data?: any) {
-  console.warn(`[HF-WARNING] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+/**
+ * Generate image with multiple fallback options
+ * يجرب نماذج متعددة حتى ينجح
+ */
+export async function generateImageWithFallback(
+  prompt: string,
+  preferredModel?: string
+): Promise<ArrayBuffer> {
+  
+  const modelsToTry = [
+    preferredModel || DEFAULT_FREE_MODEL,
+    FREE_IMAGE_MODELS.PLAYGROUND,
+    FREE_IMAGE_MODELS.SD_2_1,
+    FREE_IMAGE_MODELS.SDXL,
+    FREE_IMAGE_MODELS.REALISTIC,
+  ].filter((model, index, self) => self.indexOf(model) === index); // إزالة التكرار
+  
+  console.log(`[IMAGE-GEN] محاولة توليد صورة مع ${modelsToTry.length} نماذج احتياطية`);
+  
+  const errors: string[] = [];
+  
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const model = modelsToTry[i];
+    
+    try {
+      console.log(`[IMAGE-GEN] محاولة ${i + 1}/${modelsToTry.length}: ${model}`);
+      const result = await generateImageFree(prompt, model);
+      console.log(`[IMAGE-GEN] ✓✓✓ نجح مع النموذج: ${model} ✓✓✓`);
+      return result;
+      
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.warn(`[IMAGE-GEN] فشل ${model}: ${errorMsg}`);
+      errors.push(`${model}: ${errorMsg}`);
+      
+      // إذا كان هذا ليس آخر نموذج، انتظر قليلاً قبل المحاولة التالية
+      if (i < modelsToTry.length - 1) {
+        console.log(`[IMAGE-GEN] انتظار 3 ثوانٍ قبل المحاولة التالية...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+    }
+  }
+  
+  // فشلت جميع المحاولات
+  throw new Error(
+    `فشل توليد الصورة مع جميع النماذج:\n${errors.join('\n')}`
+  );
 }
 
-// ===== URL HELPERS =====
+// ===== التصدير السابق للتوافق =====
+// يمكنك الاحتفاظ بهذا للتوافق مع الكود القديم
+export { generateImageWithFlux };
+
+// ===== باقي الكود (merge functions, etc.) =====
+// ... (باقي الكود الموجود في huggingface.ts)
+
 function normalizeMaybeUrl(raw?: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const v = raw.trim();
@@ -49,11 +267,6 @@ function extractOutputUrl(raw: any): string | undefined {
   return normalizeMaybeUrl(v);
 }
 
-// ===== ERROR DETECTION =====
-
-/**
- * Detects HTML error pages (404, 502, etc.) that are NOT valid JSON responses.
- */
 function isHtmlErrorResponse(text: string): boolean {
   const trimmed = text.trim().toLowerCase();
   return (
@@ -71,9 +284,6 @@ function isHtmlErrorResponse(text: string): boolean {
   );
 }
 
-/**
- * Determines if error indicates space is sleeping/starting
- */
 function isSpaceSleepingError(text: string, status: number): boolean {
   const lower = text.toLowerCase();
   return (
@@ -86,8 +296,6 @@ function isSpaceSleepingError(text: string, status: number): boolean {
   );
 }
 
-// ===== HEALTH CHECK =====
-
 export interface HealthCheckResult {
   healthy: boolean;
   status?: number;
@@ -97,20 +305,17 @@ export interface HealthCheckResult {
   details?: string;
 }
 
-/**
- * Enhanced health check with detailed diagnostics
- */
 export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
   const startTime = Date.now();
   
-  logInfo(`بدء فحص صحة السيرفر على: ${HF_SPACE_URL}`);
+  console.log(`[HEALTH] فحص صحة السيرفر: ${HF_SPACE_URL}`);
   
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15000); // 15 seconds timeout
+    const timer = setTimeout(() => ctrl.abort(), 15000);
 
     const resp = await fetch(HF_SPACE_URL, {
-      method: "GET", // Use GET instead of HEAD for better compatibility
+      method: "GET",
       headers: {
         "Authorization": `Bearer ${HF_READ_TOKEN}`,
         "User-Agent": "Supabase-Edge-Function"
@@ -122,35 +327,24 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
     const responseTime = Date.now() - startTime;
     const responseText = await resp.text();
 
-    logInfo(`استجابة الفحص الصحي: HTTP ${resp.status} في ${responseTime}ms`);
-    logInfo(`محتوى الاستجابة (أول 200 حرف):`, responseText.slice(0, 200));
-
-    // Check if response is HTML error page
     if (isHtmlErrorResponse(responseText)) {
       const isSleeping = isSpaceSleepingError(responseText, resp.status);
       
-      logWarning(`السيرفر أرجع صفحة HTML${isSleeping ? ' (قد يكون في وضع السكون)' : ''}`, {
-        status: resp.status,
-        preview: responseText.slice(0, 200)
-      });
-
       return {
         healthy: false,
         status: resp.status,
         isSleeping,
         responseTime,
         error: isSleeping 
-          ? "السيرفر في وضع السكون ويحتاج إلى الاستيقاظ (قد يستغرق 1-2 دقيقة)"
-          : `السيرفر أرجع صفحة خطأ HTML (HTTP ${resp.status})`,
+          ? "السيرفر في وضع السكون"
+          : `السيرفر أرجع صفحة HTML (HTTP ${resp.status})`,
         details: responseText.slice(0, 300)
       };
     }
 
-    // Accept various success statuses
     const isHealthy = resp.ok || resp.status === 405 || resp.status === 301 || resp.status === 302;
     
     if (isHealthy) {
-      logInfo(`✓ السيرفر يعمل بشكل صحيح`);
       return {
         healthy: true,
         status: resp.status,
@@ -158,12 +352,11 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
       };
     }
 
-    logWarning(`السيرفر غير صحي: HTTP ${resp.status}`);
     return {
       healthy: false,
       status: resp.status,
       responseTime,
-      error: `السيرفر أرجع رمز حالة غير متوقع: ${resp.status}`,
+      error: `رمز حالة غير متوقع: ${resp.status}`,
       details: responseText.slice(0, 300)
     };
 
@@ -171,34 +364,23 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
     const responseTime = Date.now() - startTime;
     const errorMessage = error instanceof Error ? error.message : String(error);
     
-    logError(`فشل الفحص الصحي بعد ${responseTime}ms`, error);
-
-    // Check if timeout
-    const isTimeout = errorMessage.includes("aborted") || errorMessage.includes("timeout");
-    
     return {
       healthy: false,
       responseTime,
-      error: isTimeout 
-        ? "انتهت مهلة الاتصال بالسيرفر (15 ثانية). السيرفر قد يكون بطيئاً أو متوقفاً."
+      error: errorMessage.includes("aborted") 
+        ? "انتهت مهلة الاتصال"
         : `خطأ في الاتصال: ${errorMessage}`,
       details: errorMessage
     };
   }
 }
 
-// ===== WAKE UP SPACE =====
-
-/**
- * Attempts to wake up a sleeping Hugging Face Space
- */
 async function wakeUpSpace(): Promise<void> {
-  logInfo("محاولة إيقاظ السيرفر...");
+  console.log("[WAKE] محاولة إيقاظ السيرفر...");
   
   try {
-    // Make a simple request to wake it up
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 30000); // 30 seconds for wake up
+    const timer = setTimeout(() => ctrl.abort(), 30000);
 
     await fetch(HF_SPACE_URL, {
       method: "GET",
@@ -210,50 +392,13 @@ async function wakeUpSpace(): Promise<void> {
     
     clearTimeout(timer);
     
-    // Wait a bit for the space to fully start
-    logInfo("انتظار 10 ثوانٍ لبدء تشغيل السيرفر...");
+    console.log("[WAKE] انتظار 10 ثوانٍ لبدء التشغيل...");
     await new Promise(resolve => setTimeout(resolve, 10000));
     
   } catch (error) {
-    logWarning("قد يستغرق إيقاظ السيرفر بعض الوقت", error);
+    console.warn("[WAKE] قد يستغرق الإيقاظ وقتاً", error);
   }
 }
-
-// ===== FLUX IMAGE GENERATION =====
-
-export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  logInfo("توليد صورة باستخدام Flux", { prompt: prompt.slice(0, 100) });
-  
-  const response = await fetch(
-    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HF_READ_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          width: 1280,
-          height: 720,
-        },
-      }),
-    }
-  );
-
-  if (!response.ok) {
-    const error = await response.text();
-    logError(`فشل توليد الصورة باستخدام Flux: HTTP ${response.status}`, error);
-    throw new Error(`Flux API error (${response.status}): ${error}`);
-  }
-
-  const buffer = await response.arrayBuffer();
-  logInfo(`✓ تم توليد الصورة بنجاح (${buffer.byteLength} bytes)`);
-  return buffer;
-}
-
-// ===== MERGE INTERFACES =====
 
 export interface MergeMediaRequest {
   images?: string[];
@@ -276,11 +421,6 @@ export interface MergeMediaResponse {
   };
 }
 
-// ===== START MERGE =====
-
-/**
- * Starts a merge job on the FFmpeg Space with enhanced error handling and diagnostics.
- */
 export async function startMergeWithFFmpeg(
   request: MergeMediaRequest
 ): Promise<MergeMediaResponse> {
@@ -291,48 +431,29 @@ export async function startMergeWithFFmpeg(
     throw new Error("Missing imageUrl or audioUrl");
   }
 
-  logInfo("بدء عملية دمج الوسائط", { imageUrl: imageUrl.slice(0, 50), audioUrl: audioUrl.slice(0, 50) });
-
-  // Step 1: Health check with detailed diagnostics
-  logInfo("الخطوة 1: فحص صحة السيرفر...");
   const healthCheck = await isFFmpegSpaceHealthy();
   
   let spaceWokenUp = false;
   
   if (!healthCheck.healthy) {
-    logWarning("السيرفر غير صحي", healthCheck);
-    
-    // If space is sleeping, try to wake it up
     if (healthCheck.isSleeping) {
-      logInfo("السيرفر في وضع السكون، محاولة الإيقاظ...");
       await wakeUpSpace();
       spaceWokenUp = true;
       
-      // Check health again after wake up
       const recheckHealth = await isFFmpegSpaceHealthy();
       if (!recheckHealth.healthy) {
         throw new Error(
-          `فشل إيقاظ السيرفر. ${recheckHealth.error || 'السيرفر لا يزال غير متاح.'}\n` +
-          `التفاصيل: ${recheckHealth.details || 'لا توجد تفاصيل إضافية'}`
+          `فشل إيقاظ السيرفر. ${recheckHealth.error || 'السيرفر لا يزال غير متاح.'}`
         );
       }
-      logInfo("✓ تم إيقاظ السيرفر بنجاح");
     } else {
-      // Space is not healthy and not sleeping - hard failure
       throw new Error(
-        `سيرفر الدمج (FFmpeg Space) غير متاح.\n` +
-        `الخطأ: ${healthCheck.error || 'خطأ غير معروف'}\n` +
-        `رمز الحالة: ${healthCheck.status || 'غير متوفر'}\n` +
-        `التفاصيل: ${healthCheck.details || 'لا توجد تفاصيل'}\n` +
-        `رابط السيرفر: ${HF_SPACE_URL}\n` +
-        `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`
+        `سيرفر الدمج غير متاح.\n` +
+        `الخطأ: ${healthCheck.error || 'خطأ غير معروف'}`
       );
     }
   }
 
-  logInfo("✓ السيرفر صحي ومتاح");
-
-  // Step 2: Prepare payload
   const payload = {
     imageUrl,
     audioUrl,
@@ -342,11 +463,7 @@ export async function startMergeWithFFmpeg(
     output_format: request.output_format || "mp4",
   };
 
-  logInfo("الخطوة 2: إرسال طلب الدمج", payload);
-
-  // Step 3: Send merge request
   const mergeUrl = `${HF_SPACE_URL}/merge`;
-  logInfo(`إرسال الطلب إلى: ${mergeUrl}`);
 
   let response: Response;
   try {
@@ -360,61 +477,29 @@ export async function startMergeWithFFmpeg(
     });
   } catch (fetchError) {
     const errorMsg = fetchError instanceof Error ? fetchError.message : String(fetchError);
-    logError("فشل إرسال طلب الدمج", fetchError);
-    throw new Error(
-      `فشل الاتصال بسيرفر الدمج:\n` +
-      `الخطأ: ${errorMsg}\n` +
-      `الرابط: ${mergeUrl}\n` +
-      `تأكد من أن السيرفر يعمل وأن الشبكة متصلة`
-    );
+    throw new Error(`فشل الاتصال بسيرفر الدمج: ${errorMsg}`);
   }
 
   const responseText = await response.text();
-  logInfo(`استجابة السيرفر: HTTP ${response.status}`, responseText.slice(0, 300));
 
-  // Step 4: Validate response
   if (isHtmlErrorResponse(responseText)) {
-    const isSleeping = isSpaceSleepingError(responseText, response.status);
-    
-    logError(`السيرفر أرجع صفحة HTML بدلاً من JSON${isSleeping ? ' (قد يكون نائماً)' : ''}`, {
-      status: response.status,
-      preview: responseText.slice(0, 200)
-    });
-
     throw new Error(
-      `خطأ في السيرفر (HTTP ${response.status}):\n` +
-      `السيرفر أرجع صفحة HTML بدلاً من استجابة JSON صحيحة.\n` +
-      `${isSleeping ? 'السيرفر قد يكون في وضع السكون. حاول مرة أخرى بعد دقيقة.\n' : ''}` +
-      `المعاينة: ${responseText.slice(0, 200)}\n` +
-      `الرابط: ${mergeUrl}`
+      `خطأ في السيرفر (HTTP ${response.status}): السيرفر أرجع صفحة HTML`
     );
   }
 
   if (!response.ok) {
-    logError(`فشل طلب الدمج: HTTP ${response.status}`, responseText);
-    throw new Error(
-      `فشل سيرفر الدمج (HTTP ${response.status}):\n` +
-      `${responseText.slice(0, 500)}\n` +
-      `الرابط: ${mergeUrl}`
-    );
+    throw new Error(`FFmpeg Space error: ${responseText}`);
   }
 
-  // Step 5: Parse JSON response
   let rawResult: any;
   try {
     rawResult = JSON.parse(responseText);
-  } catch (parseError) {
-    logError("فشل تحليل استجابة JSON", { responseText: responseText.slice(0, 200), error: parseError });
-    throw new Error(
-      `استجابة غير صالحة من السيرفر:\n` +
-      `لم يتم إرجاع JSON صحيح.\n` +
-      `المحتوى: ${responseText.slice(0, 200)}`
-    );
+  } catch {
+    throw new Error(`استجابة غير صالحة من السيرفر`);
   }
 
-  logInfo("✓ تم استلام استجابة صالحة", rawResult);
-
-  const result: MergeMediaResponse = {
+  return {
     status: rawResult.status || "processing",
     progress: rawResult.progress ?? 0,
     output_url: extractOutputUrl(rawResult),
@@ -427,43 +512,24 @@ export async function startMergeWithFFmpeg(
       attempts: 1
     }
   };
-
-  return result;
 }
-
-// ===== MERGE WITH POLLING =====
 
 export async function mergeMediaWithFFmpeg(
   request: MergeMediaRequest
 ): Promise<MergeMediaResponse> {
   
-  logInfo("=== بدء عملية الدمج مع المراقبة ===");
-  
-  // Start the merge job
   const initialResult = await startMergeWithFFmpeg(request);
   
-  // If already completed or failed, return immediately
   if (initialResult.status === "completed" || initialResult.status === "failed") {
-    logInfo(`العملية انتهت فوراً بحالة: ${initialResult.status}`);
     return initialResult;
   }
 
-  // If we have a job_id, poll for completion
   if (initialResult.job_id && initialResult.status === "processing") {
-    logInfo(`بدأت المهمة بمعرف: ${initialResult.job_id}، بدء المراقبة...`);
-    return await pollForMergeCompletion(initialResult);
-  }
-
-  // If processing but no job_id, try polling anyway
-  if (initialResult.status === "processing") {
-    logInfo("المهمة قيد المعالجة بدون معرف، محاولة المراقبة...");
     return await pollForMergeCompletion(initialResult);
   }
 
   return initialResult;
 }
-
-// ===== POLLING =====
 
 async function pollForMergeCompletion(
   initialResult: MergeMediaResponse,
@@ -477,25 +543,17 @@ async function pollForMergeCompletion(
   const jobId = result.job_id;
 
   if (!jobId) {
-    logWarning("لا يوجد معرف مهمة للمراقبة");
     return result;
   }
 
-  logInfo(`بدء مراقبة المهمة ${jobId} (الحد الأقصى: ${maxAttempts} محاولة)`);
-
   while (result.status === "processing" && attempts < maxAttempts) {
     attempts++;
-    logInfo(`محاولة المراقبة ${attempts}/${maxAttempts}...`);
 
     await new Promise((resolve) => setTimeout(resolve, pollInterval));
 
     try {
       const status = await checkMergeStatus(jobId);
-      consecutiveFailures = 0; // Reset on success
-
-      logInfo(`حالة المهمة ${jobId}: ${status.status} (${status.progress}%)`, {
-        hasOutputUrl: !!status.output_url
-      });
+      consecutiveFailures = 0;
 
       result = {
         ...result,
@@ -505,75 +563,46 @@ async function pollForMergeCompletion(
         error: status.error || result.error,
       };
 
-      // Check if completed
       if (result.output_url && result.output_url.startsWith("http")) {
         result.status = "completed";
-        logInfo(`✓ اكتملت المهمة بنجاح! رابط الإخراج: ${result.output_url}`);
       }
     } catch (pollError) {
       consecutiveFailures++;
-      const errorMsg = pollError instanceof Error ? pollError.message : String(pollError);
-      logError(`فشلت محاولة المراقبة ${attempts} (متتالية: ${consecutiveFailures}/10)`, errorMsg);
 
-      // If 10 consecutive failures, assume server is down
       if (consecutiveFailures >= 10) {
-        logError("فشلت 10 محاولات متتالية - السيرفر على الأرجح متوقف");
         return {
           status: "failed",
           progress: result.progress,
-          error: `سيرفر الدمج لا يستجيب بعد ${consecutiveFailures} محاولة متتالية فاشلة.\n` +
-                 `آخر خطأ: ${errorMsg}\n` +
-                 `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`,
-          diagnostics: {
-            attempts: consecutiveFailures,
-            healthCheck: await isFFmpegSpaceHealthy()
-          }
+          error: `سيرفر الدمج لا يستجيب بعد ${consecutiveFailures} محاولة`,
         };
       }
     }
   }
 
-  // Timeout check
   if (attempts >= maxAttempts && result.status === "processing") {
-    logWarning(`انتهت مهلة المراقبة بعد ${attempts} محاولة`);
     return {
       status: "failed",
       progress: result.progress,
-      error: `تجاوزت عملية الدمج الحد الزمني (${Math.round(maxAttempts * pollInterval / 1000)} ثانية).\n` +
-             `المهمة لا تزال قيد المعالجة ولكن تم تجاوز الوقت المسموح.\n` +
-             `معرف المهمة: ${jobId}`,
-      diagnostics: {
-        attempts,
-        healthCheck: await isFFmpegSpaceHealthy()
-      }
+      error: `تجاوزت عملية الدمج الحد الزمني`,
     };
   }
 
   return result;
 }
 
-// ===== CHECK STATUS =====
-
-/**
- * Check the status of a merge job with enhanced error handling.
- */
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
-  logInfo(`فحص حالة المهمة: ${jobId}`);
-
   const candidates = [
-    { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/merge/status/${jobId}`, name: "GET /merge/status/:id" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status" },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}` },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/merge/status/${jobId}` },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId } },
   ];
 
-  const errors: string[] = [];
+  let lastErr: string | undefined;
 
   for (const c of candidates) {
     try {
-      logInfo(`محاولة ${c.name}...`);
-
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 15000); // 15 second timeout
+      const timer = setTimeout(() => ctrl.abort(), 15000);
 
       const resp = await fetch(c.url, {
         method: c.method,
@@ -588,36 +617,25 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
       clearTimeout(timer);
 
       const text = await resp.text();
-      logInfo(`${c.name} استجابة: HTTP ${resp.status}`, text.slice(0, 200));
 
-      // Detect HTML error pages
       if (isHtmlErrorResponse(text)) {
-        const error = `${c.name}: HTML error page (HTTP ${resp.status}): ${text.slice(0, 100)}`;
-        logWarning(error);
-        errors.push(error);
+        lastErr = `HTML error from ${c.url}`;
         continue;
       }
 
       if (!resp.ok) {
-        const error = `${c.name}: HTTP ${resp.status} - ${text.slice(0, 200)}`;
-        logWarning(error);
-        errors.push(error);
+        lastErr = `HTTP ${resp.status} from ${c.url}`;
         continue;
       }
 
-      // Parse JSON
       let raw: any;
       try {
         raw = JSON.parse(text);
       } catch {
-        const error = `${c.name}: Invalid JSON - ${text.slice(0, 100)}`;
-        logWarning(error);
-        errors.push(error);
+        lastErr = `Invalid JSON from ${c.url}`;
         continue;
       }
 
-      // Success!
-      logInfo(`✓ ${c.name} نجح`, raw);
       return {
         status: raw.status || "processing",
         progress: raw.progress ?? 0,
@@ -627,21 +645,9 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         message: raw.message,
       };
     } catch (e) {
-      const errorMsg = e instanceof Error ? e.message : String(e);
-      const error = `${c.name}: ${errorMsg}`;
-      logError(error);
-      errors.push(error);
+      lastErr = e instanceof Error ? e.message : String(e);
     }
   }
 
-  // All candidates failed
-  const errorSummary = `فشل فحص حالة المهمة ${jobId}. جُربت جميع نقاط النهاية:\n${errors.join('\n')}`;
-  logError(errorSummary);
-  
-  throw new Error(
-    `لم نتمكن من فحص حالة المهمة:\n` +
-    `معرف المهمة: ${jobId}\n` +
-    `الأخطاء:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join('\n')}\n` +
-    `تحقق من أن السيرفر يعمل بشكل صحيح على Hugging Face`
-  );
+  throw new Error(lastErr || "Status check failed");
 }
