@@ -1,5 +1,5 @@
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
-const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://osama141-me.hf.space";
+const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 
 // ===== LOGGING HELPERS =====
 function logInfo(message: string, data?: any) {
