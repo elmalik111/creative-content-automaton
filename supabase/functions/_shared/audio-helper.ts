@@ -138,7 +138,7 @@ export async function createAndSaveAudio(
 export async function createAudioAndMerge(
   text: string,
   imageUrl: string,
-  mergeServerUrl: string = 'https://osama141-me.hf.space',
+  mergeServerUrl: string = 'https://elmalik-ff.hf.space',
   voiceId?: string
 ): Promise<{
   jobId: string;
