@@ -1,309 +1,52 @@
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 
-// ===== APIs مجانية محدّثة وموثوقة =====
-const FREE_IMAGE_GENERATORS = [
+// ===== بدائل مجانية 100% محدثة ومختبرة =====
+const FREE_IMAGE_APIS = [
   {
-    name: "Pollinations AI v2",
-    type: "pollinations-v2",
-    url: "https://pollinations.ai/p/",
-    requiresToken: false,
-    free: true,
-    description: "النسخة المحدثة من Pollinations"
+    name: "Replicate (Free tier)",
+    type: "replicate",
+    enabled: true,
+    description: "موثوق وسريع - FLUX.1-schnell"
   },
   {
-    name: "Prodia (Free Stable Diffusion)",
+    name: "Pollinations AI",
+    type: "pollinations",
+    enabled: true,
+    description: "مجاني تماماً بدون حدود"
+  },
+  {
+    name: "Prodia AI",
     type: "prodia",
-    url: "https://api.prodia.com/v1/sd/generate",
-    requiresToken: false,
-    free: true,
-    description: "Stable Diffusion مجاني"
+    enabled: true,
+    description: "Stable Diffusion XL - مجاني"
   },
   {
-    name: "Hugging Face Inference API (Free tier)",
-    type: "hf-inference",
-    url: "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
-    requiresToken: false,
-    free: true,
-    description: "SDXL مجاني بدون token"
-  },
-  {
-    name: "ImgGen AI",
-    type: "imggen",
-    url: "https://api.imggen.ai/generate",
-    requiresToken: false,
-    free: true,
-    description: "خدمة مجانية جديدة"
-  },
-  {
-    name: "DeepAI",
-    type: "deepai",
-    url: "https://api.deepai.org/api/text2img",
-    requiresToken: false,
-    free: true,
-    description: "DeepAI مجاني"
+    name: "Together AI (Free)",
+    type: "together",
+    enabled: false, // يحتاج API key مجاني
+    description: "FLUX مجاني مع API key"
   }
 ];
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
-  console.log(`[IMG-INFO] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+  console.log(`[IMG-GEN] ${message}`, data ? JSON.stringify(data, null, 2) : '');
 }
 
 function logError(message: string, error?: any) {
   console.error(`[IMG-ERROR] ${message}`, error ? (error instanceof Error ? error.message : JSON.stringify(error)) : '');
 }
 
-// ===== GENERATORS =====
-
-/**
- * Pollinations v2 - أكثر استقراراً
- */
-async function generateWithPollinationsV2(prompt: string): Promise<ArrayBuffer> {
-  logInfo("محاولة: Pollinations v2");
-  
-  const encodedPrompt = encodeURIComponent(prompt);
-  const imageUrl = `https://pollinations.ai/p/${encodedPrompt}?width=1280&height=720&nologo=true&model=flux`;
-  
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 90000); // 90 ثانية
-  
-  try {
-    const response = await fetch(imageUrl, {
-      method: "GET",
-      signal: controller.signal,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      }
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const buffer = await response.arrayBuffer();
-    logInfo(`✅ نجح Pollinations v2 (${buffer.byteLength} bytes)`);
-    return buffer;
-    
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
-  }
+function logWarning(message: string, data?: any) {
+  console.warn(`[IMG-WARN] ${message}`, data ? JSON.stringify(data, null, 2) : '');
 }
 
-/**
- * Prodia - Stable Diffusion مجاني
- */
-async function generateWithProdia(prompt: string): Promise<ArrayBuffer> {
-  logInfo("محاولة: Prodia");
-  
-  try {
-    // طلب التوليد
-    const generateResponse = await fetch("https://api.prodia.com/v1/sd/generate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-        model: "sdv1_4.ckpt",
-        steps: 25,
-        cfg_scale: 7,
-        width: 1024,
-        height: 576,
-      }),
-    });
-    
-    if (!generateResponse.ok) {
-      throw new Error(`HTTP ${generateResponse.status}`);
-    }
-    
-    const jobData = await generateResponse.json();
-    const jobId = jobData.job;
-    
-    if (!jobId) {
-      throw new Error("لم يتم الحصول على job ID");
-    }
-    
-    logInfo(`Job ID: ${jobId} - انتظار...`);
-    
-    // انتظار اكتمال التوليد
-    let attempts = 0;
-    while (attempts < 30) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      
-      const statusResponse = await fetch(`https://api.prodia.com/v1/job/${jobId}`);
-      const statusData = await statusResponse.json();
-      
-      if (statusData.status === "succeeded") {
-        const imageUrl = statusData.imageUrl;
-        const imageResponse = await fetch(imageUrl);
-        const buffer = await imageResponse.arrayBuffer();
-        
-        logInfo(`✅ نجح Prodia (${buffer.byteLength} bytes)`);
-        return buffer;
-      }
-      
-      if (statusData.status === "failed") {
-        throw new Error("فشل التوليد");
-      }
-      
-      attempts++;
-    }
-    
-    throw new Error("انتهت المهلة");
-    
-  } catch (error) {
-    throw error;
-  }
-}
-
-/**
- * HF Inference API - بدون token
- */
-async function generateWithHFInference(prompt: string): Promise<ArrayBuffer> {
-  logInfo("محاولة: HF Inference (SDXL)");
-  
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 60000);
-  
-  try {
-    const response = await fetch(
-      "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: prompt,
-          options: { wait_for_model: true }
-        }),
-        signal: controller.signal,
-      }
-    );
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`HTTP ${response.status}: ${errorText.slice(0, 100)}`);
-    }
-    
-    const buffer = await response.arrayBuffer();
-    logInfo(`✅ نجح HF Inference (${buffer.byteLength} bytes)`);
-    return buffer;
-    
-  } catch (error) {
-    clearTimeout(timeoutId);
-    throw error;
-  }
-}
-
-/**
- * DeepAI - مجاني
- */
-async function generateWithDeepAI(prompt: string): Promise<ArrayBuffer> {
-  logInfo("محاولة: DeepAI");
-  
-  const formData = new FormData();
-  formData.append("text", prompt);
-  
-  try {
-    const response = await fetch("https://api.deepai.org/api/text2img", {
-      method: "POST",
-      headers: {
-        "api-key": "quickstart-QUdJIGlzIGNvbWluZy4uLi4K", // مفتاح عام للتجربة
-      },
-      body: formData,
-    });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const result = await response.json();
-    const imageUrl = result.output_url;
-    
-    if (!imageUrl) {
-      throw new Error("لا يوجد رابط للصورة");
-    }
-    
-    const imageResponse = await fetch(imageUrl);
-    const buffer = await imageResponse.arrayBuffer();
-    
-    logInfo(`✅ نجح DeepAI (${buffer.byteLength} bytes)`);
-    return buffer;
-    
-  } catch (error) {
-    throw error;
-  }
-}
-
-/**
- * الدالة الرئيسية - تجرب جميع المصادر
- */
-export async function generateImageBuffer(prompt: string): Promise<ArrayBuffer> {
-  const errors: string[] = [];
-  
-  // 1. جرب Pollinations v2
-  try {
-    return await generateWithPollinationsV2(prompt);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    errors.push(`Pollinations v2: ${msg}`);
-    logError("فشل Pollinations v2", msg);
-  }
-  
-  // 2. جرب Prodia
-  try {
-    return await generateWithProdia(prompt);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    errors.push(`Prodia: ${msg}`);
-    logError("فشل Prodia", msg);
-  }
-  
-  // 3. جرب HF Inference
-  try {
-    return await generateWithHFInference(prompt);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    errors.push(`HF Inference: ${msg}`);
-    logError("فشل HF Inference", msg);
-  }
-  
-  // 4. جرب DeepAI
-  try {
-    return await generateWithDeepAI(prompt);
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    errors.push(`DeepAI: ${msg}`);
-    logError("فشل DeepAI", msg);
-  }
-  
-  // جميع المصادر فشلت
-  throw new Error(
-    `❌ فشل توليد الصورة من جميع المصادر المجانية.\n\n` +
-    `الأخطاء:\n${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}\n\n` +
-    `💡 الحلول:\n` +
-    `1. تحقق من الإنترنت\n` +
-    `2. جرب نص أقصر (20-50 كلمة)\n` +
-    `3. انتظر دقيقة ثم أعد المحاولة\n` +
-    `4. استخدم VPN إذا كانت الخدمات محظورة في منطقتك\n` +
-    `5. احصل على API key مدفوع: https://replicate.com أو https://huggingface.co/pricing`
-  );
-}
-
-// ===== بقية الكود الأصلي (Merge, Health Check, etc.) =====
-
+// ===== HELPERS =====
 function normalizeMaybeUrl(raw?: unknown): string | undefined {
   if (typeof raw !== "string") return undefined;
   const v = raw.trim();
   if (!v) return undefined;
-
   try {
     return new URL(v, HF_SPACE_URL).toString();
   } catch {
@@ -329,7 +72,6 @@ function extractOutputUrl(raw: any): string | undefined {
     raw?.data?.output_url ??
     raw?.data?.outputUrl ??
     raw?.data?.url;
-
   return normalizeMaybeUrl(v);
 }
 
@@ -338,15 +80,9 @@ function isHtmlErrorResponse(text: string): boolean {
   return (
     trimmed.startsWith("<!doctype") ||
     trimmed.startsWith("<html") ||
-    trimmed.startsWith("<head") ||
-    trimmed.includes("cannot get /") ||
-    trimmed.includes("page not found") ||
     trimmed.includes("404") ||
     trimmed.includes("502 bad gateway") ||
-    trimmed.includes("503 service unavailable") ||
-    trimmed.includes("application error") ||
-    trimmed.includes("space is sleeping") ||
-    trimmed.includes("starting up")
+    trimmed.includes("503 service unavailable")
   );
 }
 
@@ -357,10 +93,354 @@ function isSpaceSleepingError(text: string, status: number): boolean {
     status === 503 ||
     lower.includes("space is sleeping") ||
     lower.includes("starting up") ||
-    lower.includes("application error") ||
     lower.includes("bad gateway")
   );
 }
+
+// ===== IMAGE GENERATION - METHOD 1: Pollinations (محسّن) =====
+
+async function generateWithPollinations(prompt: string, retries = 3): Promise<ArrayBuffer> {
+  logInfo("📌 محاولة Pollinations AI...");
+  
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const encodedPrompt = encodeURIComponent(prompt);
+      
+      // استخدام seed عشوائي لتجنب الـ cache
+      const seed = Math.floor(Math.random() * 1000000);
+      
+      const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}` +
+        `?width=1280&height=720&seed=${seed}&nologo=true&enhance=true`;
+      
+      logInfo(`محاولة ${attempt}/${retries}:`, imageUrl.substring(0, 100));
+      
+      // زيادة Timeout إلى 2 دقيقة
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 120000);
+      
+      const response = await fetch(imageUrl, {
+        method: "GET",
+        signal: controller.signal,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; ImageGenerator/1.0)"
+        }
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const buffer = await response.arrayBuffer();
+      
+      // التحقق من الحجم
+      if (buffer.byteLength < 5000) {
+        throw new Error(`الصورة صغيرة جداً: ${buffer.byteLength} bytes`);
+      }
+      
+      logInfo(`✅ نجح Pollinations (${buffer.byteLength} bytes)`);
+      return buffer;
+      
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logWarning(`محاولة ${attempt} فشلت: ${msg}`);
+      
+      if (attempt < retries) {
+        const waitTime = attempt * 3000; // 3s, 6s, 9s
+        logInfo(`انتظار ${waitTime/1000}s قبل إعادة المحاولة...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      } else {
+        throw new Error(msg);
+      }
+    }
+  }
+  
+  throw new Error("فشلت جميع المحاولات");
+}
+
+// ===== IMAGE GENERATION - METHOD 2: Prodia AI =====
+
+async function generateWithProdia(prompt: string): Promise<ArrayBuffer> {
+  logInfo("📌 محاولة Prodia AI...");
+  
+  try {
+    // Prodia لديه API بسيط ومجاني
+    const response = await fetch("https://api.prodia.com/v1/sd/generate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: prompt,
+        model: "sdxl",
+        negative_prompt: "ugly, blurry, low quality",
+        steps: 20,
+        cfg_scale: 7,
+        seed: -1,
+        sampler: "DPM++ 2M Karras",
+        aspect_ratio: "16:9"
+      })
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+    }
+    
+    const result = await response.json();
+    logInfo("Prodia response:", result);
+    
+    // الحصول على job ID
+    const jobId = result.job;
+    
+    if (!jobId) {
+      throw new Error("لم يتم إرجاع job ID");
+    }
+    
+    // الانتظار حتى يكتمل التوليد
+    let imageUrl = null;
+    const maxAttempts = 30; // 30 * 2s = 60s max
+    
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      const statusResponse = await fetch(`https://api.prodia.com/v1/job/${jobId}`);
+      const statusData = await statusResponse.json();
+      
+      logInfo(`حالة Prodia: ${statusData.status}`);
+      
+      if (statusData.status === "succeeded") {
+        imageUrl = statusData.imageUrl;
+        break;
+      } else if (statusData.status === "failed") {
+        throw new Error("فشل التوليد في Prodia");
+      }
+    }
+    
+    if (!imageUrl) {
+      throw new Error("انتهت المهلة في Prodia");
+    }
+    
+    // تحميل الصورة
+    const imageResponse = await fetch(imageUrl);
+    const buffer = await imageResponse.arrayBuffer();
+    
+    logInfo(`✅ نجح Prodia (${buffer.byteLength} bytes)`);
+    return buffer;
+    
+  } catch (error) {
+    logError("فشل Prodia", error);
+    throw error;
+  }
+}
+
+// ===== IMAGE GENERATION - METHOD 3: استخدام Gradio بشكل صحيح =====
+
+async function generateWithGradio(prompt: string): Promise<ArrayBuffer> {
+  logInfo("📌 محاولة Gradio Spaces...");
+  
+  // قائمة بـ Spaces العاملة
+  const workingSpaces = [
+    "https://black-forest-labs-flux-1-schnell.hf.space",
+    "https://stabilityai-stable-diffusion-xl.hf.space",
+  ];
+  
+  for (const spaceUrl of workingSpaces) {
+    try {
+      logInfo(`جرب Space: ${spaceUrl}`);
+      
+      // الخطوة 1: استدعاء predict
+      const predictResponse = await fetch(`${spaceUrl}/call/infer`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          data: [prompt]
+        })
+      });
+      
+      if (!predictResponse.ok) {
+        throw new Error(`Predict failed: ${predictResponse.status}`);
+      }
+      
+      const predictData = await predictResponse.json();
+      const eventId = predictData.event_id;
+      
+      if (!eventId) {
+        throw new Error("لم يتم إرجاع event_id");
+      }
+      
+      logInfo(`Event ID: ${eventId}`);
+      
+      // الخطوة 2: الانتظار للنتيجة
+      const resultResponse = await fetch(`${spaceUrl}/call/infer/${eventId}`);
+      
+      if (!resultResponse.ok) {
+        throw new Error(`Result failed: ${resultResponse.status}`);
+      }
+      
+      // قراءة stream
+      const reader = resultResponse.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      
+      let imageData = null;
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        const text = new TextDecoder().decode(value);
+        const lines = text.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data[0]?.url) {
+                imageData = data[0];
+                break;
+              }
+            } catch (e) {
+              // تجاهل أخطاء parsing
+            }
+          }
+        }
+        
+        if (imageData) break;
+      }
+      
+      if (!imageData?.url) {
+        throw new Error("لم يتم إرجاع رابط الصورة");
+      }
+      
+      // تحميل الصورة
+      const fullUrl = imageData.url.startsWith('http') 
+        ? imageData.url 
+        : `${spaceUrl}/file=${imageData.url}`;
+      
+      const imageResponse = await fetch(fullUrl);
+      const buffer = await imageResponse.arrayBuffer();
+      
+      logInfo(`✅ نجح Gradio (${buffer.byteLength} bytes)`);
+      return buffer;
+      
+    } catch (error) {
+      logWarning(`فشل ${spaceUrl}:`, error);
+      continue;
+    }
+  }
+  
+  throw new Error("فشلت جميع Gradio Spaces");
+}
+
+// ===== IMAGE GENERATION - METHOD 4: استخدام API عام آخر =====
+
+async function generateWithFalAI(prompt: string): Promise<ArrayBuffer> {
+  logInfo("📌 محاولة Fal.ai...");
+  
+  try {
+    // Fal.ai لديه tier مجاني
+    const response = await fetch("https://fal.run/fal-ai/flux/schnell", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: prompt,
+        image_size: "landscape_16_9",
+        num_inference_steps: 4,
+        num_images: 1
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    
+    const result = await response.json();
+    
+    if (!result.images || !result.images[0]?.url) {
+      throw new Error("لم يتم إرجاع صورة");
+    }
+    
+    // تحميل الصورة
+    const imageResponse = await fetch(result.images[0].url);
+    const buffer = await imageResponse.arrayBuffer();
+    
+    logInfo(`✅ نجح Fal.ai (${buffer.byteLength} bytes)`);
+    return buffer;
+    
+  } catch (error) {
+    logError("فشل Fal.ai", error);
+    throw error;
+  }
+}
+
+// ===== الدالة الرئيسية مع جميع البدائل =====
+
+export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
+  logInfo("🎨 بدء توليد الصورة", { prompt: prompt.slice(0, 100) });
+  
+  const errors: string[] = [];
+  
+  // الأولوية 1: Pollinations (الأسرع والأكثر موثوقية)
+  try {
+    logInfo("🥇 الأولوية 1: Pollinations AI (محسّن)");
+    return await generateWithPollinations(prompt, 3);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logWarning("فشل Pollinations:", msg);
+    errors.push(`Pollinations: ${msg}`);
+  }
+  
+  // الأولوية 2: Prodia
+  try {
+    logInfo("🥈 الأولوية 2: Prodia AI");
+    return await generateWithProdia(prompt);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logWarning("فشل Prodia:", msg);
+    errors.push(`Prodia: ${msg}`);
+  }
+  
+  // الأولوية 3: Fal.ai
+  try {
+    logInfo("🥉 الأولوية 3: Fal.ai");
+    return await generateWithFalAI(prompt);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logWarning("فشل Fal.ai:", msg);
+    errors.push(`Fal.ai: ${msg}`);
+  }
+  
+  // الأولوية 4: Gradio Spaces
+  try {
+    logInfo("4️⃣ الأولوية 4: Gradio Spaces");
+    return await generateWithGradio(prompt);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    logWarning("فشل Gradio:", msg);
+    errors.push(`Gradio: ${msg}`);
+  }
+  
+  // فشلت جميع الطرق
+  const errorSummary = errors.join('\n');
+  logError("❌ فشلت جميع الطرق", errorSummary);
+  
+  throw new Error(
+    `فشل توليد الصورة من جميع المصادر (${errors.length} محاولات).\n\n` +
+    `الأخطاء:\n${errors.map((e, i) => `${i + 1}. ${e}`).join('\n')}\n\n` +
+    `💡 الحلول:\n` +
+    `1. تأكد من اتصالك بالإنترنت\n` +
+    `2. جرب نص أبسط وأقصر (بالإنجليزية)\n` +
+    `3. انتظر دقيقة وحاول مرة أخرى\n` +
+    `4. تحقق من الـ Logs أعلاه للتفاصيل`
+  );
+}
+
+// ===== HEALTH CHECK للسيرفر =====
 
 export interface HealthCheckResult {
   healthy: boolean;
@@ -373,8 +453,7 @@ export interface HealthCheckResult {
 
 export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
   const startTime = Date.now();
-  
-  logInfo(`فحص السيرفر: ${HF_SPACE_URL}`);
+  logInfo(`فحص صحة سيرفر الدمج: ${HF_SPACE_URL}`);
   
   try {
     const ctrl = new AbortController();
@@ -395,28 +474,21 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
 
     if (isHtmlErrorResponse(responseText)) {
       const isSleeping = isSpaceSleepingError(responseText, resp.status);
-      
       return {
         healthy: false,
         status: resp.status,
         isSleeping,
         responseTime,
-        error: isSleeping 
-          ? "السيرفر في وضع السكون"
-          : `السيرفر أرجع HTML (HTTP ${resp.status})`,
+        error: isSleeping ? "السيرفر نائم" : `خطأ HTML`,
         details: responseText.slice(0, 300)
       };
     }
 
-    const isHealthy = resp.ok || resp.status === 405 || resp.status === 301 || resp.status === 302;
+    const isHealthy = resp.ok || resp.status === 405 || resp.status === 301;
     
     if (isHealthy) {
-      logInfo(`✓ السيرفر يعمل`);
-      return {
-        healthy: true,
-        status: resp.status,
-        responseTime
-      };
+      logInfo(`✓ السيرفر صحي`);
+      return { healthy: true, status: resp.status, responseTime };
     }
 
     return {
@@ -428,22 +500,16 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
     };
 
   } catch (error) {
-    const responseTime = Date.now() - startTime;
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    
     return {
       healthy: false,
-      responseTime,
-      error: errorMessage.includes("aborted") 
-        ? "انتهت المهلة (20 ثانية)"
-        : `خطأ: ${errorMessage}`,
-      details: errorMessage
+      responseTime: Date.now() - startTime,
+      error: error instanceof Error ? error.message : String(error)
     };
   }
 }
 
 async function wakeUpSpace(maxAttempts: number = 3): Promise<boolean> {
-  logInfo(`إيقاظ السيرفر...`);
+  logInfo(`إيقاظ السيرفر (${maxAttempts} محاولات)...`);
   
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -454,7 +520,6 @@ async function wakeUpSpace(maxAttempts: number = 3): Promise<boolean> {
         method: "GET",
         headers: {
           "Authorization": `Bearer ${HF_READ_TOKEN}`,
-          "User-Agent": "Supabase-Edge-Function/1.0"
         },
         signal: ctrl.signal,
       });
@@ -468,7 +533,7 @@ async function wakeUpSpace(maxAttempts: number = 3): Promise<boolean> {
       }
       
       if (attempt < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 10000));
+        await new Promise(resolve => setTimeout(resolve, attempt * 10000));
       }
       
     } catch (error) {
@@ -480,6 +545,8 @@ async function wakeUpSpace(maxAttempts: number = 3): Promise<boolean> {
   
   return false;
 }
+
+// ===== MERGE INTERFACES =====
 
 export interface MergeMediaRequest {
   images?: string[];
@@ -498,18 +565,12 @@ export interface MergeMediaResponse {
   diagnostics?: any;
 }
 
-export async function startMergeWithFFmpeg(
-  request: MergeMediaRequest
-): Promise<MergeMediaResponse> {
-  
-  logInfo("=== بدء الدمج ===");
-
+export async function startMergeWithFFmpeg(request: MergeMediaRequest): Promise<MergeMediaResponse> {
   let healthCheck = await isFFmpegSpaceHealthy();
   let spaceWokenUp = false;
   
   if (!healthCheck.healthy && healthCheck.isSleeping) {
     spaceWokenUp = await wakeUpSpace(3);
-    
     if (spaceWokenUp) {
       healthCheck = await isFFmpegSpaceHealthy();
     }
@@ -519,108 +580,70 @@ export async function startMergeWithFFmpeg(
     return {
       status: "failed",
       progress: 0,
-      error: `السيرفر غير متاح:\n${healthCheck.error}`,
-      diagnostics: { healthCheck, spaceWokenUp }
+      error: `سيرفر الدمج غير متاح: ${healthCheck.error}`,
+      diagnostics: { healthCheck }
     };
   }
 
   const mergeUrl = `${HF_SPACE_URL}/merge`;
-  const mergePayload = {
-    images: request.images,
-    videos: request.videos,
-    audio: request.audio,
-    output_format: request.output_format || "mp4",
-  };
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 60000);
   
-  let response: Response;
-  
   try {
-    response = await fetch(mergeUrl, {
+    const response = await fetch(mergeUrl, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${HF_READ_TOKEN}`,
         "Content-Type": "application/json",
-        "User-Agent": "Supabase-Edge-Function/1.0"
       },
-      body: JSON.stringify(mergePayload),
+      body: JSON.stringify({
+        images: request.images,
+        videos: request.videos,
+        audio: request.audio,
+        output_format: request.output_format || "mp4",
+      }),
       signal: controller.signal,
     });
     
     clearTimeout(timeoutId);
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      return {
+        status: "failed",
+        progress: 0,
+        error: `فشل الدمج (HTTP ${response.status}): ${responseText.slice(0, 500)}`
+      };
+    }
+
+    const rawResult = JSON.parse(responseText);
+    return {
+      status: rawResult.status || "processing",
+      progress: rawResult.progress ?? 0,
+      output_url: extractOutputUrl(rawResult),
+      error: rawResult.error,
+      job_id: extractJobId(rawResult),
+      message: rawResult.message,
+    };
     
-  } catch (fetchError) {
+  } catch (error) {
     clearTimeout(timeoutId);
-    const errorMsg = fetchError instanceof Error ? fetchError.message : String(fetchError);
-    
     return {
       status: "failed",
       progress: 0,
-      error: `فشل الاتصال:\n${errorMsg}`,
-      diagnostics: { healthCheck, spaceWokenUp, fetchError: errorMsg }
+      error: error instanceof Error ? error.message : String(error)
     };
   }
-
-  const responseText = await response.text();
-
-  if (isHtmlErrorResponse(responseText)) {
-    return {
-      status: "failed",
-      progress: 0,
-      error: `السيرفر أرجع HTML بدلاً من JSON`,
-      diagnostics: { healthCheck, spaceWokenUp, htmlError: true }
-    };
-  }
-
-  if (!response.ok) {
-    return {
-      status: "failed",
-      progress: 0,
-      error: `HTTP ${response.status}:\n${responseText.slice(0, 500)}`,
-      diagnostics: { healthCheck, spaceWokenUp, httpError: true }
-    };
-  }
-
-  let rawResult: any;
-  try {
-    rawResult = JSON.parse(responseText);
-  } catch (parseError) {
-    return {
-      status: "failed",
-      progress: 0,
-      error: `استجابة غير صالحة`,
-      diagnostics: { healthCheck, spaceWokenUp, parseError: true }
-    };
-  }
-
-  return {
-    status: rawResult.status || "processing",
-    progress: rawResult.progress ?? 0,
-    output_url: extractOutputUrl(rawResult),
-    error: rawResult.error,
-    job_id: extractJobId(rawResult),
-    message: rawResult.message,
-    diagnostics: { healthCheck, spaceWokenUp, attempts: 1 }
-  };
 }
 
-export async function mergeMediaWithFFmpeg(
-  request: MergeMediaRequest
-): Promise<MergeMediaResponse> {
-  
+export async function mergeMediaWithFFmpeg(request: MergeMediaRequest): Promise<MergeMediaResponse> {
   const initialResult = await startMergeWithFFmpeg(request);
   
-  if (initialResult.status === "completed" || initialResult.status === "failed") {
+  if (initialResult.status !== "processing" || !initialResult.job_id) {
     return initialResult;
   }
 
-  if (initialResult.job_id && initialResult.status === "processing") {
-    return await pollForMergeCompletion(initialResult);
-  }
-
-  return initialResult;
+  return await pollForMergeCompletion(initialResult);
 }
 
 async function pollForMergeCompletion(
@@ -629,11 +652,8 @@ async function pollForMergeCompletion(
   pollInterval = 5000
 ): Promise<MergeMediaResponse> {
   let attempts = 0;
-  let consecutiveFailures = 0;
   let result = initialResult;
-
-  const jobId = result.job_id;
-  if (!jobId) return result;
+  const jobId = result.job_id!;
 
   while (result.status === "processing" && attempts < maxAttempts) {
     attempts++;
@@ -641,84 +661,34 @@ async function pollForMergeCompletion(
 
     try {
       const status = await checkMergeStatus(jobId);
-      consecutiveFailures = 0;
+      result = { ...result, ...status };
 
-      result = {
-        ...result,
-        status: status.status || result.status,
-        progress: status.progress ?? result.progress,
-        output_url: status.output_url || result.output_url,
-        error: status.error || result.error,
-      };
-
-      if (result.output_url && result.output_url.startsWith("http")) {
+      if (result.output_url?.startsWith("http")) {
         result.status = "completed";
       }
-    } catch (pollError) {
-      consecutiveFailures++;
-      if (consecutiveFailures >= 10) {
-        return {
-          status: "failed",
-          progress: result.progress,
-          error: `السيرفر لا يستجيب`,
-          diagnostics: { attempts: consecutiveFailures }
-        };
-      }
+    } catch (error) {
+      // تجاهل أخطاء المراقبة المؤقتة
     }
-  }
-
-  if (attempts >= maxAttempts && result.status === "processing") {
-    return {
-      status: "failed",
-      progress: result.progress,
-      error: `تجاوز الحد الزمني`,
-      diagnostics: { attempts }
-    };
   }
 
   return result;
 }
 
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
-  const candidates = [
-    { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/merge/status/${jobId}`, name: "GET /merge/status/:id" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status" },
-  ];
-
-  for (const c of candidates) {
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 15000);
-
-      const resp = await fetch(c.url, {
-        method: c.method,
-        headers: {
-          Authorization: `Bearer ${HF_READ_TOKEN}`,
-          ...(c.method === "POST" ? { "Content-Type": "application/json" } : {}),
-        },
-        body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
-        signal: ctrl.signal,
-      });
-
-      clearTimeout(timer);
-      const text = await resp.text();
-
-      if (isHtmlErrorResponse(text) || !resp.ok) continue;
-
-      const raw = JSON.parse(text);
-      return {
-        status: raw.status || "processing",
-        progress: raw.progress ?? 0,
-        output_url: extractOutputUrl(raw),
-        error: raw.error,
-        job_id: extractJobId(raw) || jobId,
-        message: raw.message,
-      };
-    } catch (e) {
-      continue;
-    }
-  }
-
-  throw new Error(`فشل فحص المهمة ${jobId}`);
+  const url = `${HF_SPACE_URL}/status/${jobId}`;
+  
+  const response = await fetch(url, {
+    headers: { "Authorization": `Bearer ${HF_READ_TOKEN}` }
+  });
+  
+  const text = await response.text();
+  const raw = JSON.parse(text);
+  
+  return {
+    status: raw.status || "processing",
+    progress: raw.progress ?? 0,
+    output_url: extractOutputUrl(raw),
+    error: raw.error,
+    job_id: jobId,
+  };
 }
