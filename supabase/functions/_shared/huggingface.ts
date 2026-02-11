@@ -219,38 +219,63 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== FLUX IMAGE GENERATION =====
+// ===== IMAGE GENERATION - مجاني 100% بدون رصيد =====
+// ✅ لا يستخدم router.huggingface.co (مدفوع 402)
+// ✅ يعتمد على Pollinations AI المجاني تماماً
+
+async function tryPollinations(prompt: string, timeoutMs: number): Promise<ArrayBuffer> {
+  const seed = Date.now() + Math.floor(Math.random() * 9999);
+  const encoded = encodeURIComponent(prompt);
+  const url = `https://image.pollinations.ai/prompt/${encoded}?seed=${seed}&width=1280&height=720&nologo=true`;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    clearTimeout(timer);
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 4000) throw new Error(`حجم صغير: ${buf.byteLength}B`);
+
+    return buf;
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(msg.includes("abort") ? "TIMEOUT" : msg);
+  }
+}
 
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  logInfo("توليد صورة باستخدام Flux", { prompt: prompt.slice(0, 100) });
-  
-  const response = await fetch(
-    "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${HF_READ_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          width: 1280,
-          height: 720,
-        },
-      }),
-    }
-  );
+  logInfo("🎨 توليد صورة (Pollinations - مجاني)", { prompt: prompt.slice(0, 80) });
 
-  if (!response.ok) {
-    const error = await response.text();
-    logError(`فشل توليد الصورة باستخدام Flux: HTTP ${response.status}`, error);
-    throw new Error(`Flux API error (${response.status}): ${error}`);
+  const timeouts = [25000, 35000, 45000, 60000, 90000];
+  const errors: string[] = [];
+
+  for (let i = 0; i < timeouts.length; i++) {
+    logInfo(`محاولة ${i + 1}/${timeouts.length} (${timeouts[i] / 1000}s timeout)...`);
+    try {
+      const buf = await tryPollinations(prompt, timeouts[i]);
+      logInfo(`✅ نجح في المحاولة ${i + 1} (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+      return buf;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logWarning(`❌ محاولة ${i + 1}: ${msg}`);
+      errors.push(`#${i + 1}: ${msg}`);
+      if (i < timeouts.length - 1) await new Promise((r) => setTimeout(r, 1500));
+    }
   }
 
-  const buffer = await response.arrayBuffer();
-  logInfo(`✓ تم توليد الصورة بنجاح (${buffer.byteLength} bytes)`);
-  return buffer;
+  throw new Error(
+    `فشل توليد الصورة بعد ${timeouts.length} محاولات:
+` + errors.join("
+")
+  );
 }
 
 // ===== MERGE INTERFACES =====
@@ -333,21 +358,16 @@ export async function startMergeWithFFmpeg(
   logInfo("✓ السيرفر صحي ومتاح");
 
   // Step 2: Prepare payload
-  // ✅ FIX: إرسال imageUrl وaudioUrl بشكل صريح لتوافق server.js
-  // server.js يقرأ: imageUrl || images?.[0]  و  audioUrl || audio
   const payload = {
-    imageUrl,               // ← server.js يحتاج هذا مباشرة
-    audioUrl,               // ← server.js يحتاج هذا مباشرة
-    images: request.images, // ← Marge.ts يحتاج هذا
+    imageUrl,
+    audioUrl,
+    images: request.images,
     videos: request.videos,
-    audio: request.audio,   // ← Marge.ts يحتاج هذا
+    audio: request.audio,
     output_format: request.output_format || "mp4",
   };
 
-  logInfo("الخطوة 2: إرسال طلب الدمج", {
-    imageUrl: payload.imageUrl?.slice(0, 80),
-    audioUrl: payload.audioUrl?.slice(0, 80),
-  });
+  logInfo("الخطوة 2: إرسال طلب الدمج", payload);
 
   // Step 3: Send merge request
   const mergeUrl = `${HF_SPACE_URL}/merge`;
