@@ -79,13 +79,61 @@ function isValidPublicUrl(urlString: string): boolean {
 }
 
 /**
- * Validates media URL has correct extension
+ * Validates media URL has correct extension OR is a known dynamic image generator
+ *
+ * FIX: روابط مثل Pollinations لا تحتوي على امتداد في الـ URL
+ * مثال: https://image.pollinations.ai/prompt/sunset?seed=123
+ * يجب قبولها حتى بدون .jpg/.png
  */
 function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
   try {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname.toLowerCase();
-    return allowedExtensions.some((ext) => pathname.includes(ext));
+    const fullUrl = url.toLowerCase();
+
+    // 1. تحقق من الامتداد في المسار (الطريقة الأصلية)
+    if (allowedExtensions.some((ext) => pathname.includes(ext))) {
+      return true;
+    }
+
+    // 2. قبول روابط Supabase Storage (تُرجع صورة/صوتاً صحيحاً)
+    if (fullUrl.includes(".supabase.co/storage/")) {
+      return true;
+    }
+
+    // 3. قبول Pollinations AI (مولّد صور ديناميكي موثوق)
+    if (fullUrl.includes("image.pollinations.ai/prompt/")) {
+      return true;
+    }
+
+    // 4. قبول Hugging Face Spaces (مولّدات صور/فيديو)
+    if (fullUrl.includes(".hf.space/") || fullUrl.includes("huggingface.co/")) {
+      return true;
+    }
+
+    // 5. قبول روابط CDN شائعة بدون امتداد
+    const knownDynamicDomains = [
+      "replicate.delivery",
+      "replicate.com",
+      "fal.media",
+      "fal.run",
+      "cdn.prodia.com",
+      "oaidalleapiprodscus.blob.core.windows.net",
+    ];
+    if (knownDynamicDomains.some((domain) => fullUrl.includes(domain))) {
+      return true;
+    }
+
+    // 6. قبول الروابط التي تحتوي على content-type في query params
+    if (
+      urlObj.searchParams.has("type") ||
+      urlObj.searchParams.has("format") ||
+      urlObj.searchParams.has("output")
+    ) {
+      return true;
+    }
+
+    return false;
   } catch {
     return false;
   }
