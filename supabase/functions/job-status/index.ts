@@ -3,8 +3,9 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
-const MAX_CONSECUTIVE_FAILURES = 5;   // 5 فشل كافٍ (كان 20 → 4 ساعات انتظار!)
-const MAX_JOB_AGE_MS = 25 * 60 * 1000; // 25 دقيقة حد أقصى للمهمة
+// إعدادات المراقبة
+const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_JOB_AGE_MS = 30 * 60 * 1000; // 30 دقيقة كحد أقصى
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
@@ -15,22 +16,13 @@ function logError(message: string, error?: any) {
   console.error(`[JOB-STATUS] ${message}`, error ? (error instanceof Error ? error.message : JSON.stringify(error)) : '');
 }
 
-function logWarning(message: string, data?: any) {
-  console.warn(`[JOB-STATUS] ${message}`, data ? JSON.stringify(data, null, 2) : '');
-}
-
-// ===== AUTH HELPER =====
-async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+// ===== AUTH =====
+async function validateAuth(req: Request) {
   const authHeader = req.headers.get("Authorization");
-  
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (authHeader === `Bearer ${serviceRoleKey}`) {
-    return { valid: true };
-  }
   
-  if (!authHeader?.startsWith("Bearer ")) {
-    return { valid: false, error: "Authorization header required" };
-  }
+  if (authHeader === `Bearer ${serviceRoleKey}`) return { valid: true };
+  if (!authHeader?.startsWith("Bearer ")) return { valid: false, error: "Auth header required" };
   
   const token = authHeader.replace("Bearer ", "");
   const anonClient = createClient(
@@ -40,480 +32,191 @@ async function validateAuth(req: Request): Promise<{ valid: boolean; error?: str
   );
   
   const { data, error } = await anonClient.auth.getUser(token);
-  if (error || !data?.user) {
-    return { valid: false, error: "Invalid or expired token" };
-  }
-  
+  if (error || !data?.user) return { valid: false, error: "Invalid token" };
   return { valid: true };
 }
 
 serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const auth = await validateAuth(req);
     if (!auth.valid) {
-      return new Response(
-        JSON.stringify({ error: auth.error }),
-        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: auth.error }), { status: 401, headers: corsHeaders });
     }
 
+    // استخراج Job ID
     const url = new URL(req.url);
     const pathParts = url.pathname.split("/").filter(Boolean);
-    const maybeFromPath = pathParts[pathParts.length - 1];
-
-    let jobId: string | null = null;
-
-    if (maybeFromPath && maybeFromPath !== "job-status") {
-      jobId = maybeFromPath;
-    } else {
-      const fromQuery = url.searchParams.get("job_id") || url.searchParams.get("jobId");
-      if (fromQuery) jobId = fromQuery;
-      else {
-        const body = await req.json().catch(() => ({} as any));
-        jobId = body?.job_id || body?.jobId || null;
-      }
-    }
+    let jobId = pathParts[pathParts.length - 1] === "job-status" ? null : pathParts[pathParts.length - 1];
+    if (!jobId) jobId = url.searchParams.get("job_id");
 
     if (!jobId) {
-      return new Response(
-        JSON.stringify({ error: "job_id is required" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return new Response(JSON.stringify({ error: "job_id required" }), { status: 400, headers: corsHeaders });
     }
 
-    logInfo(`فحص حالة المهمة: ${jobId}`);
-
+    // جلب بيانات المهمة
     const { data: job, error: jobError } = await supabase
       .from("jobs")
       .select("*")
       .eq("id", jobId)
-      .maybeSingle();
+      .single();
 
-    if (jobError) {
-      logError(`فشل جلب المهمة ${jobId}`, jobError);
-      throw new Error(`Failed to fetch job: ${jobError.message}`);
+    if (jobError || !job) {
+      return new Response(JSON.stringify({ error: "Job not found" }), { status: 404, headers: corsHeaders });
     }
 
-    if (!job) {
-      logWarning(`المهمة غير موجودة: ${jobId}`);
-      return new Response(
-        JSON.stringify({ error: "Job not found" }),
-        { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    let { data: steps, error: stepsError } = await supabase
+    // جلب الخطوات
+    let { data: steps } = await supabase
       .from("job_steps")
       .select("*")
       .eq("job_id", jobId)
       .order("step_order");
 
-    if (stepsError) {
-      logError(`فشل جلب خطوات المهمة ${jobId}`, stepsError);
-      throw new Error(`Failed to fetch job steps: ${stepsError.message}`);
-    }
+    // تحديد الخطوة الحالية للمعالجة
+    const mergeStep = steps?.find((s: any) => s.step_name === "media_merge" || s.step_name === "merge");
+    
+    // === المنطق الأساسي للتحديث (POLLING LOGIC) ===
+    
+    // إذا كانت المهمة قيد المعالجة ولدينا معرف مهمة خارجي (Provider Job ID)
+    if (job.status === "processing" && mergeStep && mergeStep.status === "processing") {
+      const outputData = mergeStep.output_data || {};
+      const providerJobId = outputData.provider_job_id || outputData.job_id;
 
-    // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
-    const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
-
-    const mergeOutput = (mergeStep?.output_data || {}) as any;
-    const providerJobId: string | undefined =
-      mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
-
-    // تحقق من عمر المهمة - إذا تجاوزت 25 دقيقة → فشل فوري
-    if (job.status === "processing" && job.created_at) {
-      const jobAgeMs = Date.now() - new Date(job.created_at).getTime();
-      if (jobAgeMs > MAX_JOB_AGE_MS) {
-        const ageMin = Math.round(jobAgeMs / 60000);
-        const timeoutMsg = `[JOB-STATUS→TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — تم إيقافها تلقائياً. يرجى إنشاء مهمة جديدة.`;
-        await supabase.from("jobs").update({ status: "failed", error_message: timeoutMsg }).eq("id", jobId);
-        Object.assign(job, { status: "failed", error_message: timeoutMsg });
-        logError(`[JOB-STATUS→TIMEOUT] المهمة ${jobId} تجاوزت ${ageMin} دقيقة`);
-      }
-    }
-
-    if (job.status === "processing" && providerJobId && !job.output_url) {
-      logInfo(`[JOB-STATUS→POLL] مراقبة مهمة HF Space [${providerJobId}]`);
-
-      // Track consecutive failures
-      const currentFailures: number = mergeOutput?.consecutive_failures || 0;
-
-      try {
-        const providerStatus = await checkMergeStatus(providerJobId);
-        logInfo(`حالة المزود [${providerJobId}]:`, providerStatus);
-
-        // Success – reset failure counter
-        if (providerStatus.status === "processing") {
-          const mapped = Math.min(
-            89,
-            Math.max(
-              job.progress || 75,
-              75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
-            )
-          );
-
-          await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
-
-          if (mergeStep?.id) {
-            await supabase
-              .from("job_steps")
-              .update({
-                output_data: {
-                  ...(mergeOutput || {}),
-                  provider: "ffmpeg-space",
-                  provider_job_id: providerJobId,
-                  provider_progress: providerStatus.progress,
-                  provider_status: providerStatus.status,
-                  stage: "processing",
-                  consecutive_failures: 0, // Reset on successful check
-                  last_check: new Date().toISOString(),
-                },
-              })
-              .eq("id", mergeStep.id);
-          }
-
-          logInfo(`✓ تحديث التقدم: ${mapped}%`);
-        }
-
-        if (providerStatus.status === "failed") {
-          const msg = `[HF-SPACE→MERGE-FAILED] ${providerStatus.error || "فشل الدمج في HF Space"}`;
-          logError(`[JOB-STATUS→PROVIDER] فشل المزود [${providerJobId}]: ${msg}`);
-
-          if (mergeStep?.id) {
-            await supabase
-              .from("job_steps")
-              .update({ 
-                status: "failed", 
-                error_message: msg, 
-                completed_at: new Date().toISOString(),
-                output_data: {
-                  ...(mergeOutput || {}),
-                  provider_error: msg,
-                  failed_at: new Date().toISOString(),
-                }
-              })
-              .eq("id", mergeStep.id);
-          }
-
-          await supabase
-            .from("jobs")
-            .update({ status: "failed", error_message: msg })
-            .eq("id", jobId);
-        }
-
-        if (providerStatus.status === "completed") {
-          logInfo(`✓✓✓ اكتمل الدمج على المزود [${providerJobId}] ✓✓✓`);
-
-          if (!providerStatus.output_url) {
-            throw new Error("Merge completed but no output URL returned");
-          }
-
-          const providerOutputUrl = providerStatus.output_url;
-          logInfo(`تحميل الفيديو من: ${providerOutputUrl}`);
-
-          const videoResp = await fetch(providerOutputUrl);
-          if (!videoResp.ok) {
-            throw new Error(`Failed to download merged video (HTTP ${videoResp.status})`);
-          }
-          const videoBuffer = await videoResp.arrayBuffer();
-          logInfo(`✓ تم تحميل الفيديو (${videoBuffer.byteLength} bytes)`);
-
-          const finalVideoName = `${jobId}/final_video.mp4`;
-          const { error: uploadErr } = await supabase.storage
-            .from("media-output")
-            .upload(finalVideoName, videoBuffer, {
-              contentType: "video/mp4",
-              upsert: true,
-            });
-
-          if (uploadErr) {
-            logError(`فشل رفع الفيديو النهائي`, uploadErr);
-            throw new Error(`Final video upload failed: ${uploadErr.message}`);
-          }
-
-          const { data: publicUrlData } = supabase.storage
-            .from("media-output")
-            .getPublicUrl(finalVideoName);
-
-          const finalUrl = publicUrlData.publicUrl;
-          logInfo(`✓ الفيديو النهائي متاح على: ${finalUrl}`);
-
-          if (mergeStep?.id) {
-            await supabase
-              .from("job_steps")
-              .update({
-                status: "completed",
-                completed_at: new Date().toISOString(),
-                output_data: {
-                  ...(mergeOutput || {}),
-                  provider: "ffmpeg-space",
-                  provider_job_id: providerJobId,
-                  provider_output_url: providerOutputUrl,
-                  output_url: finalUrl,
-                  stage: "persisted",
-                  consecutive_failures: 0,
-                  completed_at: new Date().toISOString(),
-                },
-              })
-              .eq("id", mergeStep.id);
-          }
-
-          await supabase
-            .from("jobs")
-            .update({ 
-              status: "completed", 
-              progress: 100, 
-              output_url: finalUrl, 
-              error_message: null 
-            })
-            .eq("id", jobId);
-
-          if (publishStep?.id && publishStep.status !== "completed") {
-            await supabase
-              .from("job_steps")
-              .update({
-                status: "completed",
-                started_at: publishStep.started_at || new Date().toISOString(),
-                completed_at: new Date().toISOString(),
-                output_data: { video_url: finalUrl, publish_results: {} },
-              })
-              .eq("id", publishStep.id);
-          }
-
-          logInfo(`✓✓✓ المهمة ${jobId} اكتملت بنجاح! ✓✓✓`);
-        }
-      } catch (e) {
-        // استخراج رسالة الخطأ بشكل صحيح (يحل مشكلة "[object Object]")
-        const errorMsg = e instanceof Error
-          ? e.message
-          : (typeof e === 'string' ? e : JSON.stringify(e) || 'خطأ غير معروف');
-        logError(`[JOB-STATUS→POLL] خطأ في مراقبة الدمج [${jobId}]: ${errorMsg}`);
-
-        // Increment failure counter
-        const newFailures = currentFailures + 1;
-        logWarning(`فشل مراقبة الدمج ${newFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`, errorMsg);
-
-        // Check if it's a server health issue
-        let serverHealthInfo = "";
+      if (providerJobId) {
+        logInfo(`Polling external provider for job ${providerJobId}`);
+        
         try {
-          const healthCheck = await isFFmpegSpaceHealthy();
-          if (!healthCheck.healthy) {
-            serverHealthInfo = `\nحالة السيرفر: ${healthCheck.error || 'غير صحي'}`;
-            if (healthCheck.isSleeping) {
-              serverHealthInfo += "\n⚠️ السيرفر في وضع السكون - قد يحتاج إلى إعادة تشغيل";
+          // 1. فحص الحالة من السيرفر الخارجي
+          const providerStatus = await checkMergeStatus(providerJobId);
+          logInfo(`Provider response: ${providerStatus.status}`, providerStatus);
+
+          // 2. تحديث الحالة بناءً على الرد
+          if (providerStatus.status === "processing") {
+            // تحديث التقدم فقط
+            const newProgress = Math.min(90, 10 + Math.round((providerStatus.progress || 0) * 0.8));
+            
+            await supabase.from("jobs").update({ progress: newProgress }).eq("id", jobId);
+            await supabase.from("job_steps").update({
+              output_data: {
+                ...outputData,
+                provider_status: "processing",
+                provider_progress: providerStatus.progress,
+                last_check: new Date().toISOString()
+              }
+            }).eq("id", mergeStep.id);
+          }
+          else if (providerStatus.status === "completed" && providerStatus.output_url) {
+            // اكتملت المهمة! تحميل الفيديو وحفظه
+            logInfo(`Job completed! Downloading from ${providerStatus.output_url}`);
+            
+            const videoResp = await fetch(providerStatus.output_url);
+            if (videoResp.ok) {
+              const videoBuffer = await videoResp.arrayBuffer();
+              const fileName = `${jobId}/final.mp4`;
+              
+              await supabase.storage
+                .from("media-output")
+                .upload(fileName, videoBuffer, { contentType: "video/mp4", upsert: true });
+                
+              const { data: publicUrl } = supabase.storage
+                .from("media-output")
+                .getPublicUrl(fileName);
+                
+              // تحديث كل شيء للإكمال
+              await supabase.from("job_steps").update({
+                status: "completed",
+                completed_at: new Date().toISOString(),
+                output_data: { ...outputData, output_url: publicUrl.publicUrl }
+              }).eq("id", mergeStep.id);
+              
+              // تحديث الخطوة الأخيرة (Publishing)
+              const publishStep = steps?.find((s: any) => s.step_name === "publishing");
+              if (publishStep) {
+                await supabase.from("job_steps").update({
+                  status: "completed",
+                  completed_at: new Date().toISOString(),
+                  output_data: { video_url: publicUrl.publicUrl }
+                }).eq("id", publishStep.id);
+              }
+
+              await supabase.from("jobs").update({
+                status: "completed",
+                progress: 100,
+                output_url: publicUrl.publicUrl
+              }).eq("id", jobId);
+              
+              // تحديث الكائن المحلي للرد السريع
+              job.status = "completed";
+              job.output_url = publicUrl.publicUrl;
+              job.progress = 100;
             }
           }
-        } catch (healthError) {
-          logWarning('فشل فحص صحة السيرفر', healthError);
-        }
-
-        if (mergeStep?.id) {
-          await supabase
-            .from("job_steps")
-            .update({
-              output_data: {
-                ...(mergeOutput || {}),
-                consecutive_failures: newFailures,
-                last_error: errorMsg,
-                last_error_time: new Date().toISOString(),
-                server_health_checked: !!serverHealthInfo,
-              },
-            })
-            .eq("id", mergeStep.id);
-        }
-
-        // If too many consecutive failures, fail the job with detailed error
-        if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg =
-            `[JOB-STATUS→FAIL] فشل دمج الوسائط بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
-            `السبب: ${errorMsg}\n` +
-            (serverHealthInfo ? `حالة السيرفر: ${serverHealthInfo}\n` : '') +
-            `معرف مهمة HF Space: ${providerJobId}\n` +
-            `الحل: قد يكون السيرفر أُعيد تشغيله أو انتهت مهلته. أعد المحاولة.`;
-
-          logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
-
-          if (mergeStep?.id) {
-            await supabase
-              .from("job_steps")
-              .update({
-                status: "failed",
-                error_message: failMsg,
-                completed_at: new Date().toISOString(),
-                output_data: {
-                  ...(mergeOutput || {}),
-                  consecutive_failures: newFailures,
-                  max_failures_reached: true,
-                  final_error: failMsg,
-                },
-              })
-              .eq("id", mergeStep.id);
+          else if (providerStatus.status === "failed") {
+            // فشلت المهمة
+            throw new Error(providerStatus.error || "External job failed");
           }
-
-          await supabase
-            .from("jobs")
-            .update({ status: "failed", error_message: failMsg })
-            .eq("id", jobId);
-        }
-      }
-
-      // Refresh after tick
-      const refreshedJob = await supabase.from("jobs").select("*").eq("id", jobId).maybeSingle();
-      if (refreshedJob.data) {
-        Object.assign(job, {
-          status: refreshedJob.data.status,
-          progress: refreshedJob.data.progress,
-          output_url: refreshedJob.data.output_url,
-          error_message: refreshedJob.data.error_message,
-          updated_at: refreshedJob.data.updated_at,
-        });
-      }
-
-      const refreshedSteps = await supabase
-        .from("job_steps")
-        .select("*")
-        .eq("job_id", jobId)
-        .order("step_order");
-      if (refreshedSteps.data) steps = refreshedSteps.data;
-    }
-
-    // Build logs
-    const logs: Array<{
-      step: string;
-      status: string;
-      message: string;
-      duration_ms?: number;
-      started_at?: string;
-      completed_at?: string;
-      output_data?: unknown;
-      error?: string;
-    }> = [];
-
-    for (const step of steps || []) {
-      let duration_ms: number | undefined;
-      if (step.started_at && step.completed_at) {
-        duration_ms = new Date(step.completed_at).getTime() - new Date(step.started_at).getTime();
-      }
-
-      let message = "";
-      switch (step.status) {
-        case "pending":
-          message = `⏳ ${step.step_name} في انتظار البدء`;
-          break;
-        case "processing":
-          message = `🔄 ${step.step_name} جارٍ التنفيذ...`;
-          break;
-        case "completed":
-          message = `✅ ${step.step_name} اكتمل${duration_ms ? ` (${(duration_ms / 1000).toFixed(1)}s)` : ""}`;
-          break;
-        case "failed":
-          message = `❌ ${step.step_name} فشل: ${step.error_message || "خطأ غير معروف"}`;
-          break;
-        default:
-          message = step.step_name;
-      }
-
-      logs.push({
-        step: step.step_name,
-        status: step.status,
-        message,
-        duration_ms,
-        started_at: step.started_at,
-        completed_at: step.completed_at,
-        output_data: step.output_data,
-        error: step.error_message || undefined,
-      });
-    }
-
-    // Stuck detection with enhanced diagnostics
-    let isStuck = false;
-    let stuckWarning: string | undefined;
-    let stuckDiagnostics: any = undefined;
-
-    if (job.status === "processing") {
-      const processingStep = (steps || []).find((s: any) => s.status === "processing");
-      if (processingStep?.started_at) {
-        const processingDuration = Date.now() - new Date(processingStep.started_at).getTime();
-        if (processingDuration > 3 * 60 * 1000) {
-          isStuck = true;
-          const minutesStuck = Math.floor(processingDuration / 60000);
           
-          stuckWarning = `العملية متعطلة منذ ${minutesStuck} دقيقة في خطوة "${processingStep.step_name}"`;
+        } catch (err) {
+          // التعامل مع أخطاء Polling
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const failures = (outputData.consecutive_failures || 0) + 1;
           
-          // Get server health for diagnostics
-          try {
-            const healthCheck = await isFFmpegSpaceHealthy();
-            stuckDiagnostics = {
-              stuck_duration_minutes: minutesStuck,
-              stuck_step: processingStep.step_name,
-              server_healthy: healthCheck.healthy,
-              server_status: healthCheck.status,
-              server_error: healthCheck.error,
-              is_sleeping: healthCheck.isSleeping,
-              suggestion: healthCheck.isSleeping 
-                ? "السيرفر في وضع السكون - قد تحتاج لإعادة تشغيل المهمة"
-                : !healthCheck.healthy
-                  ? "السيرفر غير متاح - تحقق من حالته على Hugging Face"
-                  : "المهمة عالقة رغم أن السيرفر يعمل - قد تحتاج للإلغاء وإعادة المحاولة"
-            };
-          } catch (healthError) {
-            stuckDiagnostics = {
-              stuck_duration_minutes: minutesStuck,
-              stuck_step: processingStep.step_name,
-              health_check_failed: true,
-              error: healthError instanceof Error ? healthError.message : String(healthError)
-            };
+          logError(`Polling failed (${failures}/${MAX_CONSECUTIVE_FAILURES})`, errorMsg);
+          
+          if (failures >= MAX_CONSECUTIVE_FAILURES) {
+            // فشل نهائي
+            await supabase.from("jobs").update({ 
+              status: "failed", 
+              error_message: `Lost connection to render server: ${errorMsg}` 
+            }).eq("id", jobId);
+            
+            await supabase.from("job_steps").update({
+              status: "failed",
+              error_message: errorMsg
+            }).eq("id", mergeStep.id);
+          } else {
+            // تسجيل الفشل المؤقت
+            await supabase.from("job_steps").update({
+              output_data: { ...outputData, consecutive_failures: failures, last_error: errorMsg }
+            }).eq("id", mergeStep.id);
           }
-
-          logWarning(`المهمة ${jobId} عالقة`, stuckDiagnostics);
         }
       }
     }
+    
+    // إعادة جلب الخطوات المحدثة
+    const { data: updatedSteps } = await supabase
+      .from("job_steps")
+      .select("*")
+      .eq("job_id", jobId)
+      .order("step_order");
 
-    const response = {
-      job_id: job.id,
-      type: job.type,
-      status: job.status,
-      progress: job.progress,
-      output_url: job.output_url,
-      error_message: job.error_message,
-      created_at: job.created_at,
-      updated_at: job.updated_at,
-      logs,
-      is_stuck: isStuck,
-      stuck_warning: stuckWarning,
-      stuck_diagnostics: stuckDiagnostics,
-      is_complete: job.status === "completed",
-      is_failed: job.status === "failed",
-      can_cancel: job.status === "pending" || job.status === "processing",
-    };
-
-    logInfo(`إرجاع حالة المهمة ${jobId}`, {
-      status: job.status,
-      progress: job.progress,
-      hasOutput: !!job.output_url,
-      isStuck
-    });
+    // بناء الرد النهائي
+    const logs = (updatedSteps || []).map((step: any) => ({
+      step: step.step_name,
+      status: step.status,
+      message: step.status === 'completed' ? `✅ ${step.step_name} completed` : 
+               step.status === 'processing' ? `🔄 Processing ${step.step_name}...` : 
+               step.status === 'failed' ? `❌ Failed: ${step.error_message}` : `⏳ ${step.step_name} pending`,
+      created_at: step.created_at
+    }));
 
     return new Response(
-      JSON.stringify(response),
+      JSON.stringify({
+        job_id: job.id,
+        status: job.status,
+        progress: job.progress,
+        output_url: job.output_url,
+        logs: logs,
+        is_complete: job.status === "completed"
+      }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
+
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    logError("خطأ في job-status", error);
-    
     return new Response(
-      JSON.stringify({ 
-        error: error.message,
-        timestamp: new Date().toISOString(),
-        type: 'internal_error'
-      }),
+      JSON.stringify({ error: String(err) }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
