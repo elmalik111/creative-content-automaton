@@ -3,8 +3,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
-const MAX_CONSECUTIVE_FAILURES = 5;   // 5 فشل كافٍ (كان 20 → 4 ساعات انتظار!)
-const MAX_JOB_AGE_MS = 25 * 60 * 1000; // 25 دقيقة حد أقصى للمهمة
+const MAX_CONSECUTIVE_FAILURES = 5;
+const MAX_JOB_AGE_MS = 25 * 60 * 1000; // 25 دقيقة حد أقصى
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
@@ -67,20 +67,43 @@ serve(async (req) => {
 
     let jobId: string | null = null;
 
-    if (maybeFromPath && maybeFromPath !== "job-status") {
+    // 1. من URL path مثل /job-status/abc123
+    if (maybeFromPath && maybeFromPath !== "job-status" && maybeFromPath.length > 5) {
       jobId = maybeFromPath;
-    } else {
-      const fromQuery = url.searchParams.get("job_id") || url.searchParams.get("jobId");
-      if (fromQuery) jobId = fromQuery;
-      else {
-        const body = await req.json().catch(() => ({} as any));
-        jobId = body?.job_id || body?.jobId || null;
+    }
+
+    // 2. من query string: ?job_id=xxx أو ?jobId=xxx
+    if (!jobId) {
+      jobId = url.searchParams.get("job_id")
+           || url.searchParams.get("jobId")
+           || url.searchParams.get("id")
+           || null;
+    }
+
+    // 3. من request body (يعمل مع POST و GET الذي يحمل body)
+    if (!jobId) {
+      try {
+        const rawText = await req.text();
+        if (rawText && rawText.trim().startsWith("{")) {
+          const body = JSON.parse(rawText);
+          jobId = body?.job_id || body?.jobId || body?.id || null;
+        }
+      } catch {
+        // body فارغ أو ليس JSON - مقبول
       }
     }
 
     if (!jobId) {
+      logError("[400] job_id مفقود", {
+        method: req.method,
+        path: url.pathname,
+        query: url.search,
+      });
       return new Response(
-        JSON.stringify({ error: "job_id is required" }),
+        JSON.stringify({
+          error: "job_id is required",
+          hint: "أرسل job_id في: URL path /job-status/{id}, أو query ?job_id=xxx, أو body JSON {job_id:'xxx'}"
+        }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -118,27 +141,37 @@ serve(async (req) => {
     }
 
     // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
-    const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
+    // Marge.ts ينشئ خطوة باسم "merge" وليس "media_merge"
+    const mergeStep = (steps || []).find((s: any) =>
+      ["merge", "media_merge"].includes(s.step_name) && s.status === "processing"
+    );
+    const publishStep = (steps || []).find((s: any) =>
+      ["publishing", "finalize"].includes(s.step_name)
+    );
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
+    // البحث في كل الحقول الممكنة لـ provider_job_id
     const providerJobId: string | undefined =
-      mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
+      mergeOutput?.provider_job_id ||
+      mergeOutput?.providerJobId   ||
+      mergeOutput?.job_id          ||
+      mergeOutput?.jobId           ||
+      mergeOutput?.hf_job_id       ||
+      (job.input_data as any)?.provider_job_id;
 
-    // تحقق من عمر المهمة - إذا تجاوزت 25 دقيقة → فشل فوري
+    // مهام تجاوزت 25 دقيقة تُوقف تلقائياً
     if (job.status === "processing" && job.created_at) {
-      const jobAgeMs = Date.now() - new Date(job.created_at).getTime();
-      if (jobAgeMs > MAX_JOB_AGE_MS) {
-        const ageMin = Math.round(jobAgeMs / 60000);
-        const timeoutMsg = `[JOB-STATUS→TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — تم إيقافها تلقائياً. يرجى إنشاء مهمة جديدة.`;
+      const ageMs = Date.now() - new Date(job.created_at).getTime();
+      if (ageMs > MAX_JOB_AGE_MS) {
+        const ageMin = Math.round(ageMs / 60000);
+        const timeoutMsg = `[TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — أُوقفت تلقائياً. أنشئ مهمة جديدة.`;
         await supabase.from("jobs").update({ status: "failed", error_message: timeoutMsg }).eq("id", jobId);
         Object.assign(job, { status: "failed", error_message: timeoutMsg });
-        logError(`[JOB-STATUS→TIMEOUT] المهمة ${jobId} تجاوزت ${ageMin} دقيقة`);
       }
     }
 
     if (job.status === "processing" && providerJobId && !job.output_url) {
-      logInfo(`[JOB-STATUS→POLL] مراقبة مهمة HF Space [${providerJobId}]`);
+      logInfo(`[POLL] مراقبة مهمة HF Space [${providerJobId}]`);
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
@@ -181,8 +214,8 @@ serve(async (req) => {
         }
 
         if (providerStatus.status === "failed") {
-          const msg = `[HF-SPACE→MERGE-FAILED] ${providerStatus.error || "فشل الدمج في HF Space"}`;
-          logError(`[JOB-STATUS→PROVIDER] فشل المزود [${providerJobId}]: ${msg}`);
+          const msg = providerStatus.error || "FFmpeg provider merge failed";
+          logError(`فشل الدمج على المزود [${providerJobId}]`, msg);
 
           if (mergeStep?.id) {
             await supabase
@@ -288,11 +321,10 @@ serve(async (req) => {
           logInfo(`✓✓✓ المهمة ${jobId} اكتملت بنجاح! ✓✓✓`);
         }
       } catch (e) {
-        // استخراج رسالة الخطأ بشكل صحيح (يحل مشكلة "[object Object]")
         const errorMsg = e instanceof Error
           ? e.message
-          : (typeof e === 'string' ? e : JSON.stringify(e) || 'خطأ غير معروف');
-        logError(`[JOB-STATUS→POLL] خطأ في مراقبة الدمج [${jobId}]: ${errorMsg}`);
+          : (typeof e === "string" ? e : (JSON.stringify(e) || "خطأ غير معروف"));
+        logError(`[POLL-ERROR] ${errorMsg}`);
 
         // Increment failure counter
         const newFailures = currentFailures + 1;
@@ -330,11 +362,11 @@ serve(async (req) => {
         // If too many consecutive failures, fail the job with detailed error
         if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
           const failMsg =
-            `[JOB-STATUS→FAIL] فشل دمج الوسائط بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
+            `[MERGE-FAIL] فشل الدمج بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
             `السبب: ${errorMsg}\n` +
-            (serverHealthInfo ? `حالة السيرفر: ${serverHealthInfo}\n` : '') +
-            `معرف مهمة HF Space: ${providerJobId}\n` +
-            `الحل: قد يكون السيرفر أُعيد تشغيله أو انتهت مهلته. أعد المحاولة.`;
+            (serverHealthInfo ? `السيرفر: ${serverHealthInfo}\n` : "") +
+            `معرف HF Space: ${providerJobId}\n` +
+            `الحل: أعد تشغيل المهمة.`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
 
