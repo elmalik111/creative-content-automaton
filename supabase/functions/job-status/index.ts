@@ -3,7 +3,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
-const MAX_CONSECUTIVE_FAILURES = 20;
+const MAX_CONSECUTIVE_FAILURES = 5;   // 5 فشل كافٍ (كان 20 → 4 ساعات انتظار!)
+const MAX_JOB_AGE_MS = 25 * 60 * 1000; // 25 دقيقة حد أقصى للمهمة
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
@@ -124,8 +125,20 @@ serve(async (req) => {
     const providerJobId: string | undefined =
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
 
+    // تحقق من عمر المهمة - إذا تجاوزت 25 دقيقة → فشل فوري
+    if (job.status === "processing" && job.created_at) {
+      const jobAgeMs = Date.now() - new Date(job.created_at).getTime();
+      if (jobAgeMs > MAX_JOB_AGE_MS) {
+        const ageMin = Math.round(jobAgeMs / 60000);
+        const timeoutMsg = `[JOB-STATUS→TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — تم إيقافها تلقائياً. يرجى إنشاء مهمة جديدة.`;
+        await supabase.from("jobs").update({ status: "failed", error_message: timeoutMsg }).eq("id", jobId);
+        Object.assign(job, { status: "failed", error_message: timeoutMsg });
+        logError(`[JOB-STATUS→TIMEOUT] المهمة ${jobId} تجاوزت ${ageMin} دقيقة`);
+      }
+    }
+
     if (job.status === "processing" && providerJobId && !job.output_url) {
-      logInfo(`مراقبة عملية الدمج للمهمة ${jobId} (معرف المزود: ${providerJobId})`);
+      logInfo(`[JOB-STATUS→POLL] مراقبة مهمة HF Space [${providerJobId}]`);
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
@@ -168,8 +181,8 @@ serve(async (req) => {
         }
 
         if (providerStatus.status === "failed") {
-          const msg = providerStatus.error || "FFmpeg provider merge failed";
-          logError(`فشل الدمج على المزود [${providerJobId}]`, msg);
+          const msg = `[HF-SPACE→MERGE-FAILED] ${providerStatus.error || "فشل الدمج في HF Space"}`;
+          logError(`[JOB-STATUS→PROVIDER] فشل المزود [${providerJobId}]: ${msg}`);
 
           if (mergeStep?.id) {
             await supabase
@@ -275,8 +288,11 @@ serve(async (req) => {
           logInfo(`✓✓✓ المهمة ${jobId} اكتملت بنجاح! ✓✓✓`);
         }
       } catch (e) {
-        const errorMsg = e instanceof Error ? e.message : String(e);
-        logError(`خطأ في مراقبة الدمج [${jobId}]`, e);
+        // استخراج رسالة الخطأ بشكل صحيح (يحل مشكلة "[object Object]")
+        const errorMsg = e instanceof Error
+          ? e.message
+          : (typeof e === 'string' ? e : JSON.stringify(e) || 'خطأ غير معروف');
+        logError(`[JOB-STATUS→POLL] خطأ في مراقبة الدمج [${jobId}]: ${errorMsg}`);
 
         // Increment failure counter
         const newFailures = currentFailures + 1;
@@ -313,11 +329,12 @@ serve(async (req) => {
 
         // If too many consecutive failures, fail the job with detailed error
         if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg = 
-            `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
-            `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
-            `معرف مهمة المزود: ${providerJobId}\n` +
-            `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
+          const failMsg =
+            `[JOB-STATUS→FAIL] فشل دمج الوسائط بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
+            `السبب: ${errorMsg}\n` +
+            (serverHealthInfo ? `حالة السيرفر: ${serverHealthInfo}\n` : '') +
+            `معرف مهمة HF Space: ${providerJobId}\n` +
+            `الحل: قد يكون السيرفر أُعيد تشغيله أو انتهت مهلته. أعد المحاولة.`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
 
