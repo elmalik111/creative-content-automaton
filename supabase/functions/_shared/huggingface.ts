@@ -220,59 +220,52 @@ async function wakeUpSpace(): Promise<void> {
 }
 
 // ===== IMAGE GENERATION - Pollinations AI (مجاني 100%) =====
-// ✅ بديل مجاني تماماً عن router.huggingface.co المدفوع
-// ✅ لا يحتاج رصيداً أو اشتراكاً
-// ✅ 5 محاولات تلقائية بـ timeout متصاعد
 
 async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
   const seed = Date.now() + Math.floor(Math.random() * 99999);
   const url =
     `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
     `?seed=${seed}&width=1280&height=720&nologo=true`;
-
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { "User-Agent": "Mozilla/5.0" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "image/*",
+      },
     });
     clearTimeout(t);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`[IMAGE-GEN] HTTP ${res.status} من pollinations.ai`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 4000) throw new Error(`صورة صغيرة جداً: ${buf.byteLength}B`);
+    if (buf.byteLength < 4000) throw new Error(`[IMAGE-GEN] الصورة صغيرة جداً: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
     const m = e instanceof Error ? e.message : String(e);
-    throw new Error(m.includes("abort") ? "TIMEOUT" : m);
+    throw new Error(m.includes("abort") ? `[IMAGE-GEN] انتهت المهلة (${ms/1000}s)` : m);
   }
 }
 
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  logInfo("🎨 توليد صورة (Pollinations AI - مجاني)", { prompt: prompt.slice(0, 80) });
-
-  // timeout متصاعد: 25s → 35s → 50s → 70s → 90s
+  logInfo("[IMAGE-GEN] بدء توليد الصورة (Pollinations AI)", { prompt: prompt.slice(0, 80) });
   const timeouts = [25000, 35000, 50000, 70000, 90000];
   const errors: string[] = [];
-
   for (let i = 0; i < timeouts.length; i++) {
-    logInfo(`📸 محاولة ${i + 1}/${timeouts.length} (${timeouts[i] / 1000}s)...`);
+    logInfo(`[IMAGE-GEN] محاولة ${i + 1}/${timeouts.length} (${timeouts[i]/1000}s)`);
     try {
       const buf = await tryPollinations(prompt, timeouts[i]);
-      logInfo(`✅ نجح في المحاولة ${i + 1} (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+      logInfo(`[IMAGE-GEN] ✅ نجح (${(buf.byteLength/1024).toFixed(1)}KB)`);
       return buf;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      logWarning(`❌ محاولة ${i + 1} فشلت: ${m}`);
-      errors.push(`#${i + 1}: ${m}`);
+      logWarning(`[IMAGE-GEN] ❌ محاولة ${i + 1}: ${m}`);
+      errors.push(m);
       if (i < timeouts.length - 1) await new Promise((r) => setTimeout(r, 2000));
     }
   }
-
-  throw new Error(
-    `فشل توليد الصورة بعد ${timeouts.length} محاولات:\n` + errors.join("\n")
-  );
+  throw new Error(`[IMAGE-GEN] فشل بعد ${timeouts.length} محاولات:\n` + errors.join("\n"));
 }
 
 // ===== MERGE INTERFACES =====
