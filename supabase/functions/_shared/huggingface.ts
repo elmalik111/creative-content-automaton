@@ -56,6 +56,7 @@ function extractOutputUrl(raw: any): string | undefined {
  */
 function isHtmlErrorResponse(text: string): boolean {
   const trimmed = text.trim();
+  // JSON صحيح (يبدأ بـ { أو [) ليس HTML أبداً - يحل false positive
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
   const lower = trimmed.toLowerCase();
   return (
@@ -69,6 +70,7 @@ function isHtmlErrorResponse(text: string): boolean {
     lower.includes("application error")       ||
     lower.includes("space is sleeping")       ||
     lower.includes("starting up")
+    // "404" حُذف - يظهر داخل JSON صحيح كـ "HTTP 404"
   );
 }
 
@@ -220,7 +222,7 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== IMAGE GENERATION - Pollinations AI (مجاني 100%) =====
+// ===== IMAGE GENERATION - Pollinations AI (مجاني) =====
 
 async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
   const seed = Date.now() + Math.floor(Math.random() * 99999);
@@ -608,12 +610,12 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
       }
 
       if (resp.status === 404) {
-        logWarning(`[HF-STATUS→404] المهمة ${jobId} غير موجودة في HF Space`);
+        logWarning(`[HF-STATUS] 404 - المهمة ${jobId} غير موجودة في HF Space`);
         return { status: "failed" as const, progress: 0, job_id: jobId,
           error: "[HF-STATUS→404] المهمة غير موجودة (أُعيد تشغيل HF Space). أنشئ مهمة جديدة." };
       }
       if (!resp.ok) {
-        const error = `[HF-STATUS→HTTP] ${c.name}: HTTP ${resp.status} - ${text.slice(0, 150)}`;
+        const error = `[HF-STATUS] ${c.name}: HTTP ${resp.status} - ${text.slice(0, 150)}`;
         logWarning(error);
         errors.push(error);
         continue;
@@ -653,7 +655,7 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
   logError(errorSummary);
   
   const summary = errors.join(" | ");
-  logError(`[HF-STATUS→FAIL] تعذّر checkMergeStatus للمهمة ${jobId}: ${summary}`);
+  logError(`[HF-STATUS] تعذّر checkMergeStatus: ${summary}`);
   return { status: "failed" as const, progress: 0, job_id: jobId,
     error: `[HF-STATUS] تعذّر فحص الحالة: ${summary}` };
 }
