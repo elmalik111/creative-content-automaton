@@ -88,10 +88,10 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
     const host = urlObj.hostname.toLowerCase();
     const full = url.toLowerCase();
 
-    // 1. امتداد صريح في الـ path
+    // 1. امتداد صريح في الـ pathname
     if (allowedExtensions.some((ext) => pathname.includes(ext))) return true;
 
-    // 2. Supabase Storage (موثوق دائماً)
+    // 2. Supabase Storage (دائماً موثوق)
     if (full.includes(".supabase.co/storage/")) return true;
 
     // 3. Pollinations AI (لا يضع امتداداً في URL)
