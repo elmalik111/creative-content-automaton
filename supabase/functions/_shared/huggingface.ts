@@ -55,19 +55,20 @@ function extractOutputUrl(raw: any): string | undefined {
  * Detects HTML error pages (404, 502, etc.) that are NOT valid JSON responses.
  */
 function isHtmlErrorResponse(text: string): boolean {
-  const trimmed = text.trim().toLowerCase();
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
+  const lower = trimmed.toLowerCase();
   return (
-    trimmed.startsWith("<!doctype") ||
-    trimmed.startsWith("<html") ||
-    trimmed.startsWith("<head") ||
-    trimmed.includes("cannot get /") ||
-    trimmed.includes("page not found") ||
-    trimmed.includes("404 not found") ||
-    trimmed.includes("502 bad gateway") ||
-    trimmed.includes("503 service unavailable") ||
-    trimmed.includes("application error") ||
-    trimmed.includes("space is sleeping") ||
-    trimmed.includes("starting up")
+    lower.startsWith("<!doctype") ||
+    lower.startsWith("<html")     ||
+    lower.startsWith("<head")     ||
+    lower.includes("cannot get /")            ||
+    lower.includes("page not found")          ||
+    lower.includes("502 bad gateway")         ||
+    lower.includes("503 service unavailable") ||
+    lower.includes("application error")       ||
+    lower.includes("space is sleeping")       ||
+    lower.includes("starting up")
   );
 }
 
@@ -123,38 +124,27 @@ export async function isFFmpegSpaceHealthy(): Promise<HealthCheckResult> {
     const responseText = await resp.text();
 
     logInfo(`استجابة الفحص الصحي: HTTP ${resp.status} في ${responseTime}ms`);
-    
-    // محاولة تحليل JSON أولاً (الحل للمشكلة)
-    try {
-      JSON.parse(responseText);
-      // إذا نجح التحليل، السيرفر صحي حتى لو كان الرد يحتوي على كلمات تشبه HTML
-      logInfo(`✓ السيرفر يعمل بشكل صحيح (JSON Valid)`);
-      return {
-        healthy: true,
-        status: resp.status,
-        responseTime
-      };
-    } catch (e) {
-      // فشل تحليل JSON، الآن نفحص إذا كان خطأ HTML
-      if (isHtmlErrorResponse(responseText)) {
-        const isSleeping = isSpaceSleepingError(responseText, resp.status);
-        
-        logWarning(`السيرفر أرجع صفحة HTML${isSleeping ? ' (قد يكون في وضع السكون)' : ''}`, {
-          status: resp.status,
-          preview: responseText.slice(0, 200)
-        });
+    logInfo(`محتوى الاستجابة (أول 200 حرف):`, responseText.slice(0, 200));
 
-        return {
-          healthy: false,
-          status: resp.status,
-          isSleeping,
-          responseTime,
-          error: isSleeping 
-            ? "السيرفر في وضع السكون ويحتاج إلى الاستيقاظ (قد يستغرق 1-2 دقيقة)"
-            : `السيرفر أرجع صفحة خطأ HTML (HTTP ${resp.status})`,
-          details: responseText.slice(0, 300)
-        };
-      }
+    // Check if response is HTML error page
+    if (isHtmlErrorResponse(responseText)) {
+      const isSleeping = isSpaceSleepingError(responseText, resp.status);
+      
+      logWarning(`السيرفر أرجع صفحة HTML${isSleeping ? ' (قد يكون في وضع السكون)' : ''}`, {
+        status: resp.status,
+        preview: responseText.slice(0, 200)
+      });
+
+      return {
+        healthy: false,
+        status: resp.status,
+        isSleeping,
+        responseTime,
+        error: isSleeping 
+          ? "السيرفر في وضع السكون ويحتاج إلى الاستيقاظ (قد يستغرق 1-2 دقيقة)"
+          : `السيرفر أرجع صفحة خطأ HTML (HTTP ${resp.status})`,
+        details: responseText.slice(0, 300)
+      };
     }
 
     // Accept various success statuses
@@ -228,6 +218,48 @@ async function wakeUpSpace(): Promise<void> {
   } catch (error) {
     logWarning("قد يستغرق إيقاظ السيرفر بعض الوقت", error);
   }
+}
+
+// ===== IMAGE GENERATION - Pollinations AI (مجاني 100%) =====
+
+async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
+  const seed = Date.now() + Math.floor(Math.random() * 99999);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&width=1280&height=720&nologo=true`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "image/*" },
+    });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`[IMAGE-GEN] HTTP ${res.status} من pollinations.ai`);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 4000) throw new Error(`[IMAGE-GEN] صورة صغيرة: ${buf.byteLength}B`);
+    return buf;
+  } catch (e) {
+    clearTimeout(t);
+    const m = e instanceof Error ? e.message : String(e);
+    throw new Error(m.includes("abort") ? `[IMAGE-GEN] انتهت المهلة (${ms/1000}s)` : m);
+  }
+}
+
+export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
+  logInfo("[IMAGE-GEN] توليد الصورة (Pollinations AI)", { prompt: prompt.slice(0, 80) });
+  const timeouts = [25000, 35000, 50000, 70000, 90000];
+  const errors: string[] = [];
+  for (let i = 0; i < timeouts.length; i++) {
+    try {
+      const buf = await tryPollinations(prompt, timeouts[i]);
+      logInfo(`[IMAGE-GEN] ✅ نجح (${(buf.byteLength/1024).toFixed(1)}KB)`);
+      return buf;
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      errors.push(m);
+      if (i < timeouts.length - 1) await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+  throw new Error("[IMAGE-GEN] فشل بعد 5 محاولات: " + errors.join(" | "));
 }
 
 // ===== MERGE INTERFACES =====
@@ -349,44 +381,43 @@ export async function startMergeWithFFmpeg(
   const responseText = await response.text();
   logInfo(`استجابة السيرفر: HTTP ${response.status}`, responseText.slice(0, 300));
 
-  // Step 4: Parse JSON (PRIORITY FIX)
+  // Step 4: Validate response
+  if (isHtmlErrorResponse(responseText)) {
+    const isSleeping = isSpaceSleepingError(responseText, response.status);
+    
+    logError(`السيرفر أرجع صفحة HTML بدلاً من JSON${isSleeping ? ' (قد يكون نائماً)' : ''}`, {
+      status: response.status,
+      preview: responseText.slice(0, 200)
+    });
+
+    throw new Error(
+      `خطأ في السيرفر (HTTP ${response.status}):\n` +
+      `السيرفر أرجع صفحة HTML بدلاً من استجابة JSON صحيحة.\n` +
+      `${isSleeping ? 'السيرفر قد يكون في وضع السكون. حاول مرة أخرى بعد دقيقة.\n' : ''}` +
+      `المعاينة: ${responseText.slice(0, 200)}\n` +
+      `الرابط: ${mergeUrl}`
+    );
+  }
+
+  if (!response.ok) {
+    logError(`فشل طلب الدمج: HTTP ${response.status}`, responseText);
+    throw new Error(
+      `فشل سيرفر الدمج (HTTP ${response.status}):\n` +
+      `${responseText.slice(0, 500)}\n` +
+      `الرابط: ${mergeUrl}`
+    );
+  }
+
+  // Step 5: Parse JSON response
   let rawResult: any;
   try {
     rawResult = JSON.parse(responseText);
   } catch (parseError) {
-    // If JSON parse fails, THEN check for HTML errors
-    if (isHtmlErrorResponse(responseText)) {
-      const isSleeping = isSpaceSleepingError(responseText, response.status);
-      
-      logError(`السيرفر أرجع صفحة HTML بدلاً من JSON${isSleeping ? ' (قد يكون نائماً)' : ''}`, {
-        status: response.status,
-        preview: responseText.slice(0, 200)
-      });
-
-      throw new Error(
-        `خطأ في السيرفر (HTTP ${response.status}):\n` +
-        `السيرفر أرجع صفحة HTML بدلاً من استجابة JSON صحيحة.\n` +
-        `${isSleeping ? 'السيرفر قد يكون في وضع السكون. حاول مرة أخرى بعد دقيقة.\n' : ''}` +
-        `المعاينة: ${responseText.slice(0, 200)}\n` +
-        `الرابط: ${mergeUrl}`
-      );
-    }
-
     logError("فشل تحليل استجابة JSON", { responseText: responseText.slice(0, 200), error: parseError });
     throw new Error(
       `استجابة غير صالحة من السيرفر:\n` +
       `لم يتم إرجاع JSON صحيح.\n` +
       `المحتوى: ${responseText.slice(0, 200)}`
-    );
-  }
-
-  if (!response.ok) {
-    // It's JSON but an error response
-    logError(`فشل طلب الدمج: HTTP ${response.status}`, rawResult);
-    throw new Error(
-      `فشل سيرفر الدمج (HTTP ${response.status}):\n` +
-      `${rawResult.error || rawResult.message || responseText.slice(0, 500)}\n` +
-      `الرابط: ${mergeUrl}`
     );
   }
 
@@ -536,7 +567,7 @@ async function pollForMergeCompletion(
  * Check the status of a merge job with enhanced error handling.
  */
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
-  logInfo(`[HF-STATUS] فحص حالة المهمة: ${jobId}`);
+  logInfo(`فحص حالة المهمة: ${jobId}`);
 
   const candidates = [
     { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
@@ -568,38 +599,47 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
       const text = await resp.text();
       logInfo(`${c.name} استجابة: HTTP ${resp.status}`, text.slice(0, 200));
 
-      // FIX: Try to parse JSON FIRST before checking for HTML errors
+      // Detect HTML error pages
+      if (isHtmlErrorResponse(text)) {
+        const error = `${c.name}: HTML error page (HTTP ${resp.status}): ${text.slice(0, 100)}`;
+        logWarning(error);
+        errors.push(error);
+        continue;
+      }
+
+      if (resp.status === 404) {
+        logWarning(`[HF-STATUS→404] المهمة ${jobId} غير موجودة في HF Space`);
+        return { status: "failed" as const, progress: 0, job_id: jobId,
+          error: "[HF-STATUS→404] المهمة غير موجودة (أُعيد تشغيل HF Space). أنشئ مهمة جديدة." };
+      }
+      if (!resp.ok) {
+        const error = `[HF-STATUS→HTTP] ${c.name}: HTTP ${resp.status} - ${text.slice(0, 150)}`;
+        logWarning(error);
+        errors.push(error);
+        continue;
+      }
+
+      // Parse JSON
       let raw: any;
       try {
         raw = JSON.parse(text);
-        
-        // If we reach here, it IS valid JSON. Ignore any HTML warnings.
-        logInfo(`✓ ${c.name} نجح (تم تحليل JSON)`, raw);
-        
-        return {
-          status: raw.status || "processing",
-          progress: raw.progress ?? 0,
-          output_url: extractOutputUrl(raw),
-          error: raw.error,
-          job_id: extractJobId(raw) || jobId,
-          message: raw.message,
-        };
-
-      } catch (jsonError) {
-        // Only if JSON parsing fails, verify if it's an HTML error
-        if (isHtmlErrorResponse(text)) {
-          const error = `${c.name}: HTML error page (HTTP ${resp.status}): ${text.slice(0, 100)}`;
-          logWarning(error);
-          errors.push(error);
-          continue;
-        }
-
+      } catch {
         const error = `${c.name}: Invalid JSON - ${text.slice(0, 100)}`;
         logWarning(error);
         errors.push(error);
         continue;
       }
 
+      // Success!
+      logInfo(`✓ ${c.name} نجح`, raw);
+      return {
+        status: raw.status || "processing",
+        progress: raw.progress ?? 0,
+        output_url: extractOutputUrl(raw),
+        error: raw.error,
+        job_id: extractJobId(raw) || jobId,
+        message: raw.message,
+      };
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
       const error = `${c.name}: ${errorMsg}`;
@@ -612,11 +652,8 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
   const errorSummary = `فشل فحص حالة المهمة ${jobId}. جُربت جميع نقاط النهاية:\n${errors.join('\n')}`;
   logError(errorSummary);
   
-  // Return failed status instead of throwing
-  return {
-    status: "failed",
-    progress: 0,
-    error: `[HF-STATUS] تعذّر التحقق من حالة المهمة في HF Space: ${errors.join(" | ")}`,
-    job_id: jobId,
-  };
+  const summary = errors.join(" | ");
+  logError(`[HF-STATUS→FAIL] تعذّر checkMergeStatus للمهمة ${jobId}: ${summary}`);
+  return { status: "failed" as const, progress: 0, job_id: jobId,
+    error: `[HF-STATUS] تعذّر فحص الحالة: ${summary}` };
 }
