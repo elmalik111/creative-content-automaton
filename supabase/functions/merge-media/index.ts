@@ -86,15 +86,10 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname.toLowerCase();
     const host = urlObj.hostname.toLowerCase();
-    // 1. امتداد صريح
     if (allowedExtensions.some((ext) => pathname.includes(ext))) return true;
-    // 2. Supabase Storage
     if (host.includes("supabase.co") && pathname.includes("/storage/")) return true;
-    // 3. Pollinations AI
     if (host === "image.pollinations.ai") return true;
-    // 4. HF Space
     if (host.endsWith(".hf.space")) return true;
-    // 5. خدمات AI معروفة
     const trusted = ["replicate.delivery","replicate.com","fal.media","fal.run","fal.ai"];
     if (trusted.some((d) => host.includes(d))) return true;
     return false;
