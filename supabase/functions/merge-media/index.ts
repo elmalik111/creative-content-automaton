@@ -87,19 +87,19 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
     const pathname = urlObj.pathname.toLowerCase();
     const host = urlObj.hostname.toLowerCase();
 
-    // 1. امتداد صريح في الـ path (السلوك الأصلي)
+    // 1. امتداد صريح في الـ pathname
     if (allowedExtensions.some((ext) => pathname.includes(ext))) return true;
 
-    // 2. Supabase Storage - الروابط لا تنتهي دائماً بامتداد
+    // 2. Supabase Storage
     if (host.includes("supabase.co") && pathname.includes("/storage/")) return true;
 
-    // 3. Pollinations AI - رابط ديناميكي بدون امتداد
+    // 3. Pollinations AI (URL ديناميكي بدون امتداد)
     if (host === "image.pollinations.ai") return true;
 
     // 4. Hugging Face Spaces
     if (host.endsWith(".hf.space")) return true;
 
-    // 5. خدمات AI معروفة
+    // 5. خدمات AI أخرى موثوقة
     const trusted = ["replicate.delivery", "replicate.com", "fal.media", "fal.run", "fal.ai"];
     if (trusted.some((d) => host.includes(d))) return true;
 
@@ -115,19 +115,19 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
 function validateMediaUrls(request: MergeRequest): { valid: boolean; error?: string } {
   // Validate audio URL
   if (!isValidPublicUrl(request.audio)) {
-    return { valid: false, error: "Invalid audio URL format or blocked internal address" };
+    return { valid: false, error: `[MERGE-VALIDATE] رابط الصوت غير صالح: "${request.audio?.slice(0,100)}"` };
   }
   if (!hasValidExtension(request.audio, ALLOWED_AUDIO_EXTENSIONS)) {
-    return { valid: false, error: `Invalid audio format. Allowed: ${ALLOWED_AUDIO_EXTENSIONS.join(", ")}` };
+    return { valid: false, error: `[MERGE-VALIDATE] امتداد الصوت غير مدعوم: "${request.audio?.slice(0,100)}" — المسموح: ${ALLOWED_AUDIO_EXTENSIONS.join(", ")}` };
   }
 
   // Validate images
   for (const imageUrl of request.images || []) {
     if (!isValidPublicUrl(imageUrl)) {
-      return { valid: false, error: "Invalid image URL format or blocked internal address" };
+      return { valid: false, error: `[MERGE-VALIDATE] رابط الصورة غير صالح: "${imageUrl?.slice(0,100)}"` };
     }
     if (!hasValidExtension(imageUrl, ALLOWED_IMAGE_EXTENSIONS)) {
-      return { valid: false, error: `Invalid image format. Allowed: ${ALLOWED_IMAGE_EXTENSIONS.join(", ")}` };
+      return { valid: false, error: `[MERGE-VALIDATE] امتداد الصورة غير مدعوم: "${imageUrl?.slice(0,100)}" — المسموح: ${ALLOWED_IMAGE_EXTENSIONS.join(", ")}` };
     }
   }
 
