@@ -79,59 +79,34 @@ function isValidPublicUrl(urlString: string): boolean {
 }
 
 /**
- * Validates media URL has correct extension OR is a known dynamic image generator
- *
- * FIX: روابط مثل Pollinations لا تحتوي على امتداد في الـ URL
- * مثال: https://image.pollinations.ai/prompt/sunset?seed=123
- * يجب قبولها حتى بدون .jpg/.png
+ * Validates media URL has correct extension
  */
 function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
   try {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname.toLowerCase();
-    const fullUrl = url.toLowerCase();
+    const host = urlObj.hostname.toLowerCase();
+    const full = url.toLowerCase();
 
-    // 1. تحقق من الامتداد في المسار (الطريقة الأصلية)
-    if (allowedExtensions.some((ext) => pathname.includes(ext))) {
-      return true;
-    }
+    // 1. امتداد صريح في الـ path
+    if (allowedExtensions.some((ext) => pathname.includes(ext))) return true;
 
-    // 2. قبول روابط Supabase Storage (تُرجع صورة/صوتاً صحيحاً)
-    if (fullUrl.includes(".supabase.co/storage/")) {
-      return true;
-    }
+    // 2. Supabase Storage (موثوق دائماً)
+    if (full.includes(".supabase.co/storage/")) return true;
 
-    // 3. قبول Pollinations AI (مولّد صور ديناميكي موثوق)
-    if (fullUrl.includes("image.pollinations.ai/prompt/")) {
-      return true;
-    }
+    // 3. Pollinations AI (لا يضع امتداداً في URL)
+    if (host.includes("image.pollinations.ai")) return true;
 
-    // 4. قبول Hugging Face Spaces (مولّدات صور/فيديو)
-    if (fullUrl.includes(".hf.space/") || fullUrl.includes("huggingface.co/")) {
-      return true;
-    }
+    // 4. Hugging Face Spaces
+    if (host.endsWith(".hf.space") || host.includes("huggingface.co")) return true;
 
-    // 5. قبول روابط CDN شائعة بدون امتداد
-    const knownDynamicDomains = [
-      "replicate.delivery",
-      "replicate.com",
-      "fal.media",
-      "fal.run",
-      "cdn.prodia.com",
-      "oaidalleapiprodscus.blob.core.windows.net",
+    // 5. خدمات AI معروفة
+    const trusted = [
+      "replicate.delivery", "replicate.com",
+      "fal.media", "fal.run", "fal.ai",
+      "cdn.prodia.com", "stability.ai",
     ];
-    if (knownDynamicDomains.some((domain) => fullUrl.includes(domain))) {
-      return true;
-    }
-
-    // 6. قبول الروابط التي تحتوي على content-type في query params
-    if (
-      urlObj.searchParams.has("type") ||
-      urlObj.searchParams.has("format") ||
-      urlObj.searchParams.has("output")
-    ) {
-      return true;
-    }
+    if (trusted.some((d) => host.includes(d))) return true;
 
     return false;
   } catch {
