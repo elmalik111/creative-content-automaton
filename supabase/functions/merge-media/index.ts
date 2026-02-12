@@ -86,26 +86,21 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
     const urlObj = new URL(url);
     const pathname = urlObj.pathname.toLowerCase();
     const host = urlObj.hostname.toLowerCase();
-    const full = url.toLowerCase();
 
-    // 1. امتداد صريح في الـ pathname
+    // 1. امتداد صريح في الـ path (السلوك الأصلي)
     if (allowedExtensions.some((ext) => pathname.includes(ext))) return true;
 
-    // 2. Supabase Storage (دائماً موثوق)
-    if (full.includes(".supabase.co/storage/")) return true;
+    // 2. Supabase Storage - الروابط لا تنتهي دائماً بامتداد
+    if (host.includes("supabase.co") && pathname.includes("/storage/")) return true;
 
-    // 3. Pollinations AI (لا يضع امتداداً في URL)
-    if (host.includes("image.pollinations.ai")) return true;
+    // 3. Pollinations AI - رابط ديناميكي بدون امتداد
+    if (host === "image.pollinations.ai") return true;
 
     // 4. Hugging Face Spaces
-    if (host.endsWith(".hf.space") || host.includes("huggingface.co")) return true;
+    if (host.endsWith(".hf.space")) return true;
 
     // 5. خدمات AI معروفة
-    const trusted = [
-      "replicate.delivery", "replicate.com",
-      "fal.media", "fal.run", "fal.ai",
-      "cdn.prodia.com", "stability.ai",
-    ];
+    const trusted = ["replicate.delivery", "replicate.com", "fal.media", "fal.run", "fal.ai"];
     if (trusted.some((d) => host.includes(d))) return true;
 
     return false;
