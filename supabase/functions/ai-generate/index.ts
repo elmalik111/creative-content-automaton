@@ -12,7 +12,7 @@ interface JobInputData {
   title: string;
   description: string;
   voice_type: string;
-  scene_count: number;
+  scene_count: number; // عدد الصور (1-10)
   duration: number;
 }
 
@@ -84,13 +84,13 @@ serve(async (req) => {
 
     const inputData = job.input_data as JobInputData;
 
-    // Create job steps
+    // Create job steps (الأسماء متوافقة مع job-status.ts)
     const steps: StepIds = {
-      scriptStep: await createJobStep(job_id, "script_generation", 1),
-      voiceStep: await createJobStep(job_id, "voice_generation", 2),
-      imageStep: await createJobStep(job_id, "image_generation", 3),
-      mergeStep: await createJobStep(job_id, "media_merge", 4),
-      publishStep: await createJobStep(job_id, "publishing", 5),
+      scriptStep:  await createJobStep(job_id, "script_generation", 1),
+      voiceStep:   await createJobStep(job_id, "voice_generation",  2),
+      imageStep:   await createJobStep(job_id, "image_generation",  3),
+      mergeStep:   await createJobStep(job_id, "merge",             4), // "merge" يُكشف بـ job-status
+      publishStep: await createJobStep(job_id, "publishing",        5),
     };
 
     // Start processing in background (non-blocking)
@@ -164,46 +164,61 @@ async function processAIGeneration(
 
     // Step 3: Generate image prompts with Gemini and images with Flux
     await updateJobStep(steps.imageStep, "processing");
-    console.log("Generating image prompts...");
-    const imagePrompts = await generateImagePrompts(script, inputData.scene_count);
+
+    // تأكد من scene_count صحيح (بين 1 و 10)
+    const sceneCount = Math.max(1, Math.min(inputData.scene_count || 3, 10));
+    console.log(`Generating ${sceneCount} image prompts...`);
+
+    const imagePrompts = await generateImagePrompts(script, sceneCount);
+    console.log(`Got ${imagePrompts.length} prompts for ${sceneCount} scenes`);
     await updateJobProgress(jobId, 40);
 
-    // Generate images with Flux
-    console.log("Generating images...");
+    // توليد الصور
+    console.log("Generating images with Flux...");
     const imageUrls: string[] = [];
-    const progressPerImage = 30 / inputData.scene_count;
+    const progressPerImage = 30 / sceneCount;
 
-    for (let i = 0; i < imagePrompts.length; i++) {
-      const prompt = imagePrompts[i];
-      console.log(`Generating image ${i + 1}/${imagePrompts.length}: ${prompt.slice(0, 50)}...`);
-      
-      const imageBuffer = await generateImageWithFlux(prompt);
-      
-      const imageFileName = `${jobId}/image_${i}.png`;
-      const { error: imageUploadError } = await supabase.storage
-        .from("temp-files")
-        .upload(imageFileName, imageBuffer, {
-          contentType: "image/png",
-        });
+    for (let i = 0; i < sceneCount; i++) {
+      const prompt = imagePrompts[i]; // gemini.ts يضمن وجود sceneCount prompts
+      console.log(`[IMAGE ${i + 1}/${sceneCount}] prompt: ${prompt.slice(0, 80)}...`);
 
-      if (imageUploadError) {
-        console.error(`Image ${i} upload failed:`, imageUploadError);
-        continue;
+      try {
+        const imageBuffer = await generateImageWithFlux(prompt);
+
+        const imageFileName = `${jobId}/image_${i}.png`;
+        const { error: imageUploadError } = await supabase.storage
+          .from("temp-files")
+          .upload(imageFileName, imageBuffer, { contentType: "image/png" });
+
+        if (imageUploadError) {
+          console.error(`[IMAGE ${i + 1}] upload failed:`, imageUploadError.message);
+          continue;
+        }
+
+        const { data: imageUrlData } = supabase.storage
+          .from("temp-files")
+          .getPublicUrl(imageFileName);
+
+        imageUrls.push(imageUrlData.publicUrl);
+        console.log(`[IMAGE ${i + 1}/${sceneCount}] ✅ uploaded: ${imageUrlData.publicUrl.slice(-30)}`);
+      } catch (imgErr) {
+        console.error(`[IMAGE ${i + 1}/${sceneCount}] ❌ generation failed:`, imgErr);
+        // لا نوقف العملية - نكمل بالصور الناجحة
       }
 
-      const { data: imageUrlData } = supabase.storage
-        .from("temp-files")
-        .getPublicUrl(imageFileName);
-
-      imageUrls.push(imageUrlData.publicUrl);
       await updateJobProgress(jobId, 40 + (i + 1) * progressPerImage);
     }
 
     if (imageUrls.length === 0) {
-      throw new Error("Failed to generate any images");
+      throw new Error(`فشل توليد جميع الصور (${sceneCount} صور مطلوبة)`);
     }
 
-    await updateJobStep(steps.imageStep, "completed", undefined, { image_urls: imageUrls });
+    console.log(`✅ تم توليد ${imageUrls.length}/${sceneCount} صورة بنجاح`);
+    await updateJobStep(steps.imageStep, "completed", undefined, {
+      image_urls: imageUrls,
+      requested: sceneCount,
+      generated: imageUrls.length,
+    });
     await updateJobProgress(jobId, 75);
 
     // Step 4: Merge images with audio
@@ -247,7 +262,10 @@ async function processAIGeneration(
     await updateJobStep(steps.mergeStep, "processing", undefined, {
       provider: "ffmpeg-space",
       provider_job_id: mergeStart.job_id,
+      job_id: mergeStart.job_id,     // للتوافق مع job-status.ts
+      step_name: "media_merge",       // للتوافق مع job-status.ts  
       stage: "queued",
+      images_count: imageUrls.length,
     });
 
     // Keep job in processing; the frontend polling will call job-status which will
