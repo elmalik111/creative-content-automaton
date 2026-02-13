@@ -14,6 +14,16 @@ interface JobInputData {
   voice_type: string;
   scene_count: number;
   duration: number;
+  // ⭐ NEW: دعم السكربت الجاهز مع أوصاف الصور
+  script_data?: {
+    title: string;
+    scenes: Array<{
+      sceneNumber: number;
+      narration: string;
+      imagePrompt: string;
+      duration: number;
+    }>;
+  };
 }
 
 interface StepIds {
@@ -89,7 +99,7 @@ serve(async (req) => {
       scriptStep:  await createJobStep(job_id, "script_generation", 1),
       voiceStep:   await createJobStep(job_id, "voice_generation",  2),
       imageStep:   await createJobStep(job_id, "image_generation",  3),
-      mergeStep:   await createJobStep(job_id, "merge",             4), // "merge" متوافق مع job-status.ts
+      mergeStep:   await createJobStep(job_id, "merge",             4),
       publishStep: await createJobStep(job_id, "publishing",        5),
     };
 
@@ -120,20 +130,71 @@ async function processAIGeneration(
     // Update status to processing
     await updateJobProgress(jobId, 5, "processing");
 
-    // Step 1: Generate voiceover script with Gemini
-    await updateJobStep(steps.scriptStep, "processing");
-    console.log("Generating voiceover script...");
-    const script = await generateVoiceoverScript(
-      inputData.title,
-      inputData.description,
-      inputData.duration
-    );
-    await updateJobStep(steps.scriptStep, "completed", undefined, { script });
+    // ⭐ IMPROVED: Check if we have pre-generated script with image prompts
+    let script: string;
+    let imagePrompts: string[];
+    
+    if (inputData.script_data?.scenes && inputData.script_data.scenes.length > 0) {
+      // ✅ حالة 1: السكربت جاهز مع أوصاف الصور (من generate-script)
+      console.log("✅ Using pre-generated script with image prompts");
+      await updateJobStep(steps.scriptStep, "processing");
+      
+      script = inputData.script_data.scenes
+        .map(scene => scene.narration)
+        .join("\n\n");
+      
+      imagePrompts = inputData.script_data.scenes.map(scene => {
+        // التأكد من أن الـ prompt بالإنجليزية ومفصّل
+        let prompt = scene.imagePrompt.trim();
+        
+        // إذا كان الـ prompt قصير جداً، نحسّنه
+        if (prompt.length < 50) {
+          prompt = `${prompt}, cinematic 4K, professional photography, highly detailed, dramatic lighting`;
+        }
+        
+        // التأكد من عدم وجود نص عربي
+        if (/[\u0600-\u06FF]/.test(prompt)) {
+          console.warn(`⚠️ Scene ${scene.sceneNumber} has Arabic in imagePrompt, needs translation`);
+          // في هذه الحالة سنستخدم الـ fallback لاحقاً
+        }
+        
+        return prompt;
+      });
+      
+      await updateJobStep(steps.scriptStep, "completed", undefined, { 
+        script,
+        source: "pre_generated",
+        scenes_count: inputData.script_data.scenes.length
+      });
+      
+      console.log(`📝 Script loaded: ${script.length} chars, ${imagePrompts.length} image prompts`);
+    } else {
+      // ✅ حالة 2: توليد السكربت من الصفر (الطريقة القديمة)
+      console.log("🔄 Generating new script from scratch");
+      await updateJobStep(steps.scriptStep, "processing");
+      
+      script = await generateVoiceoverScript(
+        inputData.title,
+        inputData.description,
+        inputData.duration
+      );
+      
+      await updateJobStep(steps.scriptStep, "completed", undefined, { 
+        script,
+        source: "generated"
+      });
+      
+      // توليد أوصاف الصور من السكربت
+      const sceneCount = Math.max(1, Math.min(inputData.scene_count || 3, 10));
+      imagePrompts = await generateImagePrompts(script, sceneCount);
+    }
+    
     await updateJobProgress(jobId, 15);
 
     // Step 2: Generate audio with ElevenLabs
     await updateJobStep(steps.voiceStep, "processing");
-    console.log("Generating audio...");
+    console.log("🎤 Generating audio...");
+    
     const voiceId = inputData.voice_type === "female_arabic" 
       ? "EXAVITQu4vr4xnSDxMaL"  // Sarah
       : "onwK4e9ZLuTAKqWW03F9"; // Daniel
@@ -164,19 +225,38 @@ async function processAIGeneration(
 
     // Step 3: توليد الصور
     await updateJobStep(steps.imageStep, "processing");
-    const sceneCount = Math.max(1, Math.min(inputData.scene_count || 3, 10));
-    console.log(`[IMAGES] طلب ${sceneCount} صورة...`);
+    const sceneCount = imagePrompts.length;
+    console.log(`🖼️ Generating ${sceneCount} images...`);
 
-    // توليد الـ prompts (gemini.ts يضمن sceneCount prompts بالإنجليزية)
-    const imagePrompts = await generateImagePrompts(script, sceneCount);
+    // ⭐ CRITICAL: تنظيف وتحسين الـ prompts قبل الإرسال
+    const cleanedPrompts = imagePrompts.map((prompt, idx) => {
+      let cleaned = prompt.trim();
+      
+      // إزالة أي نص عربي
+      if (/[\u0600-\u06FF]/.test(cleaned)) {
+        console.warn(`⚠️ Prompt ${idx + 1} contains Arabic, using fallback`);
+        cleaned = `cinematic scene ${idx + 1}, professional photography, 4K ultra HD, dramatic lighting`;
+      }
+      
+      // التأكد من وجود كلمات مفتاحية للجودة
+      const qualityKeywords = ['cinematic', '4K', 'professional', 'detailed', 'dramatic'];
+      const hasQuality = qualityKeywords.some(kw => cleaned.toLowerCase().includes(kw));
+      
+      if (!hasQuality) {
+        cleaned = `${cleaned}, cinematic 4K, professional photography, highly detailed`;
+      }
+      
+      return cleaned;
+    });
+
     await updateJobProgress(jobId, 42);
 
     const imageUrls: string[] = [];
     const progressPerImage = 28 / sceneCount;
 
     for (let i = 0; i < sceneCount; i++) {
-      const prompt = imagePrompts[i];
-      console.log(`[IMAGE ${i + 1}/${sceneCount}] prompt: "${prompt.slice(0, 80)}"`);
+      const prompt = cleanedPrompts[i];
+      console.log(`[IMAGE ${i + 1}/${sceneCount}] prompt: "${prompt.slice(0, 100)}..."`);
 
       try {
         const imageBuffer = await generateImageWithFlux(prompt);
@@ -187,7 +267,7 @@ async function processAIGeneration(
           .upload(imageFileName, imageBuffer, { contentType: "image/png" });
 
         if (imageUploadError) {
-          console.error(`[IMAGE ${i + 1}] upload فشل:`, imageUploadError.message);
+          console.error(`[IMAGE ${i + 1}] upload failed:`, imageUploadError.message);
           continue;
         }
 
@@ -195,9 +275,9 @@ async function processAIGeneration(
           .from("temp-files").getPublicUrl(imageFileName);
 
         imageUrls.push(imageUrlData.publicUrl);
-        console.log(`[IMAGE ${i + 1}/${sceneCount}] ✅ ${imageUrlData.publicUrl.slice(-40)}`);
+        console.log(`[IMAGE ${i + 1}/${sceneCount}] ✅ Generated successfully`);
       } catch (imgErr) {
-        console.error(`[IMAGE ${i + 1}/${sceneCount}] ❌ فشل:`, imgErr);
+        console.error(`[IMAGE ${i + 1}/${sceneCount}] ❌ Failed:`, imgErr);
         // نكمل بالصور الناجحة
       }
 
@@ -205,22 +285,22 @@ async function processAIGeneration(
     }
 
     if (imageUrls.length === 0) {
-      throw new Error(`فشل توليد جميع الصور (${sceneCount} مطلوبة)`);
+      throw new Error(`Failed to generate all images (${sceneCount} requested)`);
     }
-    console.log(`✅ ${imageUrls.length}/${sceneCount} صورة بنجاح`);
+    console.log(`✅ ${imageUrls.length}/${sceneCount} images generated successfully`);
 
     await updateJobStep(steps.imageStep, "completed", undefined, {
       image_urls: imageUrls,
       requested: sceneCount,
       generated: imageUrls.length,
+      prompts_used: cleanedPrompts,
     });
     await updateJobProgress(jobId, 72);
 
     // Step 4: Merge images with audio
     await updateJobStep(steps.mergeStep, "processing");
-    console.log("Merging media...");
-    // IMPORTANT: do NOT long-poll inside ai-generate. Just start the provider job and
-    // let the UI polling (job-status) advance it.
+    console.log("🎬 Merging media...");
+    
     const mergeStart = await startMergeWithFFmpeg({
       images: imageUrls,
       audio: audioUrlData.publicUrl,
@@ -233,12 +313,10 @@ async function processAIGeneration(
       throw new Error(mergeStart.error || "Video merge failed");
     }
 
-    // If provider returned an immediate output URL, we can complete quickly.
     if (mergeStart.output_url) {
       await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeStart.output_url });
       await updateJobProgress(jobId, 90);
-      // Publishing stays in the existing pipeline, but immediate outputs are rare.
-      // For now: mark job completed with the provider URL.
+      
       await supabase
         .from("jobs")
         .update({
@@ -263,8 +341,6 @@ async function processAIGeneration(
       images_count: imageUrls.length,
     });
 
-    // Keep job in processing; the frontend polling will call job-status which will
-    // check the provider status and finalize upload/output_url.
     await updateJobProgress(jobId, 78);
     return;
   } catch (err) {
@@ -310,7 +386,6 @@ async function autoPublishToConnectedPlatforms(
 ): Promise<Record<string, { success: boolean; url?: string; error?: string }>> {
   const results: Record<string, { success: boolean; url?: string; error?: string }> = {};
 
-  // Get all active OAuth tokens
   const { data: tokens } = await supabase
     .from("oauth_tokens")
     .select("platform")
@@ -325,7 +400,6 @@ async function autoPublishToConnectedPlatforms(
   
   console.log("Auto-publishing to:", connectedPlatforms);
 
-  // Call publish-video function
   try {
     const response = await fetch(
       `https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/publish-video`,
@@ -381,7 +455,6 @@ async function sendTelegramNotification(
 
   if (!tokenSetting?.value) return;
 
-  // Build publish status message
   let publishStatus = "";
   const platforms = Object.keys(publishResults);
   
