@@ -90,7 +90,7 @@ function hasValidExtension(url: string, allowedExtensions: string[]): boolean {
     if (host.includes("supabase.co") && pathname.includes("/storage/")) return true;
     if (host === "image.pollinations.ai") return true;
     if (host.endsWith(".hf.space")) return true;
-    const trusted = ["replicate.delivery","replicate.com","fal.media","fal.run","fal.ai"];
+    const trusted = ["replicate.delivery","replicate.com","fal.media","fal.run","fal.ai","picsum.photos"];
     if (trusted.some((d) => host.includes(d))) return true;
     return false;
   } catch {
