@@ -4,7 +4,7 @@ import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
 const MAX_CONSECUTIVE_FAILURES = 5;
-const MAX_JOB_AGE_MS = 25 * 60 * 1000; // 25 دقيقة حد أقصى
+const MAX_JOB_AGE_MS = 25 * 60 * 1000;
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
@@ -71,7 +71,6 @@ serve(async (req) => {
     if (maybeFromPath && maybeFromPath !== "job-status" && maybeFromPath.length > 5) {
       jobId = maybeFromPath;
     }
-
     // 2. من query string: ?job_id=xxx أو ?jobId=xxx
     if (!jobId) {
       jobId = url.searchParams.get("job_id")
@@ -79,8 +78,7 @@ serve(async (req) => {
            || url.searchParams.get("id")
            || null;
     }
-
-    // 3. من request body (يعمل مع POST و GET الذي يحمل body)
+    // 3. من request body
     if (!jobId) {
       try {
         const rawText = await req.text();
@@ -88,21 +86,15 @@ serve(async (req) => {
           const body = JSON.parse(rawText);
           jobId = body?.job_id || body?.jobId || body?.id || null;
         }
-      } catch {
-        // body فارغ أو ليس JSON - مقبول
-      }
+      } catch { /* body فارغ */ }
     }
 
     if (!jobId) {
-      logError("[400] job_id مفقود", {
-        method: req.method,
-        path: url.pathname,
-        query: url.search,
-      });
+      logError("[400] job_id مفقود", { method: req.method, path: url.pathname, query: url.search });
       return new Response(
         JSON.stringify({
           error: "job_id is required",
-          hint: "أرسل job_id في: URL path /job-status/{id}, أو query ?job_id=xxx, أو body JSON {job_id:'xxx'}"
+          hint: "أرسل job_id في: URL path, query ?job_id=xxx, أو body {job_id:'xxx'}"
         }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -141,7 +133,6 @@ serve(async (req) => {
     }
 
     // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    // Marge.ts ينشئ خطوة باسم "merge" وليس "media_merge"
     const mergeStep = (steps || []).find((s: any) =>
       ["merge", "media_merge"].includes(s.step_name) && s.status === "processing"
     );
@@ -150,28 +141,23 @@ serve(async (req) => {
     );
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
-    // البحث في كل الحقول الممكنة لـ provider_job_id
     const providerJobId: string | undefined =
-      mergeOutput?.provider_job_id ||
-      mergeOutput?.providerJobId   ||
-      mergeOutput?.job_id          ||
-      mergeOutput?.jobId           ||
-      mergeOutput?.hf_job_id       ||
+      mergeOutput?.provider_job_id || mergeOutput?.providerJobId ||
+      mergeOutput?.job_id || mergeOutput?.jobId || mergeOutput?.hf_job_id ||
       (job.input_data as any)?.provider_job_id;
 
-    // مهام تجاوزت 25 دقيقة تُوقف تلقائياً
     if (job.status === "processing" && job.created_at) {
       const ageMs = Date.now() - new Date(job.created_at).getTime();
       if (ageMs > MAX_JOB_AGE_MS) {
         const ageMin = Math.round(ageMs / 60000);
-        const timeoutMsg = `[TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — أُوقفت تلقائياً. أنشئ مهمة جديدة.`;
+        const timeoutMsg = `[TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — أُوقفت تلقائياً`;
         await supabase.from("jobs").update({ status: "failed", error_message: timeoutMsg }).eq("id", jobId);
         Object.assign(job, { status: "failed", error_message: timeoutMsg });
       }
     }
 
     if (job.status === "processing" && providerJobId && !job.output_url) {
-      logInfo(`[POLL] مراقبة مهمة HF Space [${providerJobId}]`);
+      logInfo(`[POLL] مراقبة HF Space [${providerJobId}]`);
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
@@ -365,7 +351,7 @@ serve(async (req) => {
             `[MERGE-FAIL] فشل الدمج بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
             `السبب: ${errorMsg}\n` +
             (serverHealthInfo ? `السيرفر: ${serverHealthInfo}\n` : "") +
-            `معرف HF Space: ${providerJobId}\n` +
+            `HF Job ID: ${providerJobId}\n` +
             `الحل: أعد تشغيل المهمة.`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
