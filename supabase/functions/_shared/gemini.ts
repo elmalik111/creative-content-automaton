@@ -104,77 +104,139 @@ export async function generateImagePrompts(
 ): Promise<string[]> {
   const count = Math.max(1, Math.min(sceneCount || 3, 10));
 
-  // Step 1: extract topic from the Arabic script
-  const topicPrompt =
-    "Read this Arabic voiceover script and extract in English:\n" +
-    "SUBJECT: [the main subject - person name, place, event, or topic]\n" +
-    "ELEMENTS: [3-5 key visual elements from the script, comma-separated]\n" +
-    "MOOD: [visual mood/tone]\n\n" +
-    "Arabic script:\n" +
-    script.slice(0, 600) +
-    "\n\nRespond ONLY with the three lines above. No extra text.";
+  // استراتيجية محسّنة: نطلب من Gemini تحليل السكربت وتوليد الـ prompts مباشرة
+  const imagePromptRequest = `أنت خبير في تحليل النصوص العربية وتوليد أوصاف بصرية دقيقة بالإنجليزية.
 
-  let subject = "";
-  let elements = "";
-  let mood = "cinematic, dramatic";
+النص العربي التالي هو سكربت صوتي لفيديو قصير:
 
+"""
+${script}
+"""
+
+مهمتك:
+1. اقرأ وافهم النص العربي بعمق
+2. حدد الموضوع الرئيسي والعناصر البصرية المهمة
+3. أنشئ EXACTLY ${count} وصف صورة (image prompts) بالإنجليزية فقط
+
+⚠️ CRITICAL RULES:
+- كل prompt يجب أن يكون مرتبط مباشرة بمحتوى النص العربي
+- لا تكتب أوصاف عامة (مثل: طبيعة، سماء، مدينة عشوائية)
+- إذا كان النص عن شخصية تاريخية → اكتب عنها وعن عصرها
+- إذا كان عن حدث → اكتب عن الحدث ومكانه
+- إذا كان عن مكان → اكتب عن المكان وتفاصيله المحددة
+- إذا كان عن مفهوم → اكتب تمثيل بصري للمفهوم
+
+FORMAT المطلوب:
+اكتب ${count} أسطر فقط، كل سطر:
+1. [English image prompt 50-80 words, cinematic, 4K, professional photography]
+2. [English image prompt 50-80 words, cinematic, 4K, professional photography]
+...
+
+Requirements لكل prompt:
+- طول: 50-80 كلمة
+- لغة: إنجليزية فقط
+- جودة: cinematic 4K, professional photography or digital art
+- كل prompt يُظهر زاوية أو مشهد مختلف من نفس الموضوع
+- مرتبط بالنص العربي 100%
+
+ابدأ الآن - اكتب الـ ${count} prompts فقط، بدون شرح:`;
+
+  console.log(`[GEMINI] Requesting ${count} prompts directly from Arabic script`);
+  
+  let result: string;
   try {
-    const topicResult = await generateWithGemini(topicPrompt);
-    console.log("[GEMINI] Topic result:", topicResult.slice(0, 200));
-    const subMatch  = topicResult.match(/SUBJECT:\s*(.+)/i);
-    const elMatch   = topicResult.match(/ELEMENTS:\s*(.+)/i);
-    const moodMatch = topicResult.match(/MOOD:\s*(.+)/i);
-    if (subMatch?.[1]  && subMatch[1].trim().length > 1)  subject  = subMatch[1].trim();
-    if (elMatch?.[1]   && elMatch[1].trim().length > 1)   elements = elMatch[1].trim();
-    if (moodMatch?.[1] && moodMatch[1].trim().length > 1) mood     = moodMatch[1].trim();
-    console.log(`[GEMINI] Subject="${subject}" Elements="${elements}" Mood="${mood}"`);
+    result = await generateWithGemini(imagePromptRequest);
+    console.log(`[GEMINI] Raw response (${result.length} chars):`);
+    console.log(result.slice(0, 400));
   } catch (e) {
-    console.warn("[GEMINI] Topic extraction failed:", e instanceof Error ? e.message : String(e));
+    console.error("[GEMINI] Failed to generate prompts:", e);
+    // Fallback strategy
+    return generateFallbackPrompts(script, count);
   }
-
-  // Step 2: generate image prompts grounded in the extracted subject
-  const subjectLine = subject
-    ? "The video is about: " + subject + ". Key visuals: " + (elements || subject) + "."
-    : "Based on this Arabic script: " + script.slice(0, 400);
-
-  const imagePromptRequest =
-    "You are an expert AI image prompt engineer.\n\n" +
-    subjectLine + "\n\n" +
-    "Create EXACTLY " + count + " image generation prompts in ENGLISH ONLY.\n" +
-    "Each prompt MUST depict the specific subject above — NOT generic nature or sky.\n\n" +
-    "RULES:\n" +
-    "- Exactly " + count + " prompts, numbered 1 to " + count + "\n" +
-    "- ENGLISH ONLY\n" +
-    "- Each prompt: 50-80 words\n" +
-    "- EVERY prompt must mention: " + (subject || "the main topic") + "\n" +
-    "- Cinematic 4K quality, professional photography or digital painting\n" +
-    "- Each prompt shows a different scene/angle\n" +
-    "- Output ONLY the numbered list, nothing else\n\n" +
-    "PROMPTS:";
-
-  console.log(`[GEMINI] Requesting ${count} prompts. Subject: "${subject}"`);
-  const result = await generateWithGemini(imagePromptRequest);
-  console.log(`[GEMINI] Raw response (${result.length} chars): ${result.slice(0, 300)}`);
 
   let prompts = parseImagePrompts(result, count);
   console.log(`[GEMINI] Parsed ${prompts.length}/${count} prompts`);
 
-  // Fallback uses the extracted subject — never generic
+  // إذا كانت الـ prompts المستخرجة قليلة، نحاول استخراج إضافي
+  if (prompts.length < count) {
+    console.warn(`[GEMINI] Got only ${prompts.length} prompts, extracting more...`);
+    
+    // نحاول استخراج أي جملة إنجليزية طويلة
+    const lines = result.split("\n");
+    for (const line of lines) {
+      if (prompts.length >= count) break;
+      
+      const cleaned = line
+        .trim()
+        .replace(/^[\d.\-\)\s*:]+/, "") // إزالة الترقيم
+        .replace(/\*+/g, "")
+        .trim();
+      
+      // نتحقق: إنجليزية، طويلة، غير موجودة
+      if (
+        cleaned.length > 40 &&
+        !/[\u0600-\u06FF]/.test(cleaned) && // ليست عربية
+        !prompts.includes(cleaned)
+      ) {
+        prompts.push(cleaned);
+      }
+    }
+  }
+
+  // إذا ما زلنا نحتاج المزيد، نستخدم fallback ذكي
+  if (prompts.length < count) {
+    console.warn(`[GEMINI] Still need more prompts (${prompts.length}/${count}), using smart fallback`);
+    const fallbackPrompts = await generateFallbackPrompts(script, count - prompts.length);
+    prompts.push(...fallbackPrompts);
+  }
+
+  return prompts.slice(0, count);
+}
+
+// دالة مساعدة: توليد prompts احتياطية ذكية بناءً على السكربت
+async function generateFallbackPrompts(script: string, count: number): Promise<string[]> {
+  console.log(`[FALLBACK] Generating ${count} smart fallback prompts`);
+  
+  // نحاول استخراج كلمات مفتاحية من السكربت العربي
+  const keywordPrompt = `اقرأ هذا النص العربي واستخرج 5 كلمات مفتاحية بالإنجليزية تصف الموضوع الرئيسي:
+
+${script.slice(0, 500)}
+
+اكتب 5 كلمات فقط بالإنجليزية، مفصولة بفواصل:`;
+
+  let keywords = "historical scene, ancient civilization, cultural heritage, dramatic moment, significant event";
+  
+  try {
+    const keywordResult = await generateWithGemini(keywordPrompt);
+    const extracted = keywordResult
+      .split("\n")[0]
+      .trim()
+      .replace(/[^\w\s,]/g, "");
+    
+    if (extracted.length > 10 && !/[\u0600-\u06FF]/.test(extracted)) {
+      keywords = extracted;
+      console.log(`[FALLBACK] Extracted keywords: ${keywords}`);
+    }
+  } catch (e) {
+    console.warn("[FALLBACK] Keyword extraction failed, using defaults");
+  }
+
+  const prompts: string[] = [];
   const angles = [
-    "wide establishing shot",
-    "close-up detail shot",
-    "dramatic low-angle view",
-    "medium shot with depth of field",
-    "aerial overhead view",
+    "dramatic wide establishing shot",
+    "intense close-up with shallow depth of field", 
+    "cinematic low-angle heroic perspective",
+    "overhead aerial view showing scale",
+    "medium shot with emotional lighting",
+    "dynamic action shot with motion blur",
+    "intimate portrait with environmental context"
   ];
-  while (prompts.length < count) {
-    const i = prompts.length;
+
+  for (let i = 0; i < count; i++) {
     const angle = angles[i % angles.length];
-    const fb = subject
-      ? `${subject}, ${elements || "detailed historical setting"}, ${angle}, cinematic lighting, 4K ultra HD, highly detailed, ${mood}`
-      : `Cinematic ${angle}, dramatic lighting, professional photography, 4K`;
-    console.warn(`[GEMINI] Fallback prompt ${i + 1}: ${fb.slice(0, 70)}`);
-    prompts.push(fb);
+    const prompt = `${keywords}, ${angle}, cinematic lighting, epic atmosphere, highly detailed, 4K ultra HD, professional photography, dramatic composition, rich colors, photorealistic`;
+    prompts.push(prompt);
+    console.log(`[FALLBACK] Prompt ${i + 1}: ${prompt.slice(0, 70)}...`);
   }
 
   return prompts;
