@@ -215,9 +215,8 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== IMAGE GENERATION - Multi-provider with fallback =====
+// ===== IMAGE GENERATION - Pollinations AI + Picsum fallback =====
 
-// Provider 1: Pollinations AI (الأفضل جودةً)
 async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
   const seed = Date.now() + Math.floor(Math.random() * 99999);
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&width=1280&height=720&nologo=true&model=flux`;
@@ -228,78 +227,71 @@ async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer>
       signal: ctrl.signal,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
-        "Accept": "image/webp,image/png,image/*,*/*",
+        "Accept": "image/webp,image/png,image/*",
         "Referer": "https://pollinations.ai/",
       },
     });
     clearTimeout(t);
-    if (!res.ok) throw new Error(`[IMAGE-GEN] HTTP ${res.status} من pollinations.ai`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} من pollinations.ai`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 4000) throw new Error(`[IMAGE-GEN] صورة صغيرة جداً: ${buf.byteLength}B`);
+    if (buf.byteLength < 4000) throw new Error(`صورة صغيرة جداً: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
     const m = e instanceof Error ? e.message : String(e);
-    throw new Error(m.includes("abort") ? `[IMAGE-GEN] انتهت المهلة (${ms/1000}s)` : m);
+    throw new Error(m.includes("abort") ? `انتهت المهلة (${ms/1000}s)` : m);
   }
 }
 
-// Provider 2: Picsum Photos (صور عالية الجودة - لا يحتاج مفتاح)
 async function tryPicsum(seed: number, ms: number): Promise<ArrayBuffer> {
-  const id = (seed % 1000) + 1; // 1-1000 صورة متاحة
+  const id = (Math.abs(seed) % 1000) + 1;
   const url = `https://picsum.photos/seed/${id}/1280/720`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/*" },
-    });
+    const res = await fetch(url, { signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0" } });
     clearTimeout(t);
-    if (!res.ok) throw new Error(`[IMAGE-GEN-PICSUM] HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Picsum HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 10000) throw new Error(`[IMAGE-GEN-PICSUM] ملف صغير: ${buf.byteLength}B`);
+    if (buf.byteLength < 10000) throw new Error(`Picsum صورة صغيرة: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
-    const m = e instanceof Error ? e.message : String(e);
-    throw new Error(m.includes("abort") ? `[IMAGE-GEN-PICSUM] انتهت المهلة` : m);
+    throw new Error(e instanceof Error ? e.message : String(e));
   }
 }
 
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
   logInfo("[IMAGE-GEN] بدء توليد الصورة", { prompt: prompt.slice(0, 80) });
-
   const seed = Date.now();
   const errors: string[] = [];
 
-  // المحاولات: 3 مع Pollinations (مهلات متزايدة)
-  const pollinationsTimeouts = [30000, 45000, 60000];
-  for (let i = 0; i < pollinationsTimeouts.length; i++) {
+  // 3 محاولات مع Pollinations (مهل متزايدة)
+  for (const ms of [30000, 45000, 60000]) {
     try {
-      const buf = await tryPollinations(prompt, pollinationsTimeouts[i]);
-      logInfo(`[IMAGE-GEN] ✅ Pollinations نجح (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+      const buf = await tryPollinations(prompt, ms);
+      logInfo(`[IMAGE-GEN] ✅ Pollinations (${(buf.byteLength/1024).toFixed(1)}KB)`);
       return buf;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      logWarning(`[IMAGE-GEN] Pollinations محاولة ${i + 1}: ${m}`);
-      errors.push(`Pollinations[${i+1}]: ${m}`);
-      if (i < pollinationsTimeouts.length - 1) await new Promise((r) => setTimeout(r, 3000));
+      logWarning(`[IMAGE-GEN] Pollinations فشل (${ms/1000}s): ${m}`);
+      errors.push(m);
+      await new Promise(r => setTimeout(r, 2000));
     }
   }
 
   // Fallback: Picsum Photos
-  logWarning("[IMAGE-GEN] Pollinations فشل - جاري التحويل إلى Picsum Photos");
+  logWarning("[IMAGE-GEN] التحويل إلى Picsum Photos كـ fallback");
   try {
     const buf = await tryPicsum(seed, 20000);
-    logInfo(`[IMAGE-GEN] ✅ Picsum Photos نجح كـ fallback (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+    logInfo(`[IMAGE-GEN] ✅ Picsum fallback (${(buf.byteLength/1024).toFixed(1)}KB)`);
     return buf;
   } catch (e) {
-    const m = e instanceof Error ? e.message : String(e);
-    errors.push(`Picsum: ${m}`);
+    errors.push(`Picsum: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  throw new Error("[IMAGE-GEN] فشل كل providers: " + errors.join(" | "));
+  throw new Error("[IMAGE-GEN] فشل كل providers:
+" + errors.join(" | "));
 }
 
 // ===== MERGE INTERFACES =====
@@ -648,14 +640,11 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
       }
 
       if (resp.status === 404) {
-        logWarning(`[HF-STATUS] 404 - المهمة ${jobId} غير موجودة في HF Space`);
         return { status: "failed" as const, progress: 0, job_id: jobId,
-          error: "[HF-STATUS→404] المهمة غير موجودة (أُعيد تشغيل HF Space). أنشئ مهمة جديدة." };
+          error: "[HF-STATUS→404] المهمة غير موجودة (أُعيد تشغيل HF Space)." };
       }
       if (!resp.ok) {
-        const error = `[HF-STATUS] ${c.name}: HTTP ${resp.status} - ${text.slice(0, 150)}`;
-        logWarning(error);
-        errors.push(error);
+        errors.push(`${c.name}: HTTP ${resp.status} - ${text.slice(0, 100)}`);
         continue;
       }
 
@@ -692,8 +681,6 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
   const errorSummary = `فشل فحص حالة المهمة ${jobId}. جُربت جميع نقاط النهاية:\n${errors.join('\n')}`;
   logError(errorSummary);
   
-  const summary = errors.join(" | ");
-  logError(`[HF-STATUS] تعذّر checkMergeStatus: ${summary}`);
   return { status: "failed" as const, progress: 0, job_id: jobId,
-    error: `[HF-STATUS] تعذّر فحص الحالة: ${summary}` };
+    error: `[HF-STATUS] تعذّر فحص الحالة: ${errors.join(" | ")}` };
 }
