@@ -56,21 +56,14 @@ function extractOutputUrl(raw: any): string | undefined {
  */
 function isHtmlErrorResponse(text: string): boolean {
   const trimmed = text.trim();
-  // JSON صحيح (يبدأ بـ { أو [) ليس HTML أبداً - يحل false positive
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
   const lower = trimmed.toLowerCase();
   return (
-    lower.startsWith("<!doctype") ||
-    lower.startsWith("<html")     ||
-    lower.startsWith("<head")     ||
-    lower.includes("cannot get /")            ||
-    lower.includes("page not found")          ||
-    lower.includes("502 bad gateway")         ||
-    lower.includes("503 service unavailable") ||
-    lower.includes("application error")       ||
-    lower.includes("space is sleeping")       ||
+    lower.startsWith("<!doctype") || lower.startsWith("<html") || lower.startsWith("<head") ||
+    lower.includes("cannot get /") || lower.includes("page not found") ||
+    lower.includes("502 bad gateway") || lower.includes("503 service unavailable") ||
+    lower.includes("application error") || lower.includes("space is sleeping") ||
     lower.includes("starting up")
-    // "404" حُذف - يظهر داخل JSON صحيح كـ "HTTP 404"
   );
 }
 
@@ -222,22 +215,27 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== IMAGE GENERATION - Pollinations AI (مجاني) =====
+// ===== IMAGE GENERATION - Multi-provider with fallback =====
 
+// Provider 1: Pollinations AI (الأفضل جودةً)
 async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
   const seed = Date.now() + Math.floor(Math.random() * 99999);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&width=1280&height=720&nologo=true`;
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&width=1280&height=720&nologo=true&model=flux`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept": "image/*" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
+        "Accept": "image/webp,image/png,image/*,*/*",
+        "Referer": "https://pollinations.ai/",
+      },
     });
     clearTimeout(t);
     if (!res.ok) throw new Error(`[IMAGE-GEN] HTTP ${res.status} من pollinations.ai`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 4000) throw new Error(`[IMAGE-GEN] صورة صغيرة: ${buf.byteLength}B`);
+    if (buf.byteLength < 4000) throw new Error(`[IMAGE-GEN] صورة صغيرة جداً: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
@@ -246,22 +244,62 @@ async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer>
   }
 }
 
+// Provider 2: Picsum Photos (صور عالية الجودة - لا يحتاج مفتاح)
+async function tryPicsum(seed: number, ms: number): Promise<ArrayBuffer> {
+  const id = (seed % 1000) + 1; // 1-1000 صورة متاحة
+  const url = `https://picsum.photos/seed/${id}/1280/720`;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { "User-Agent": "Mozilla/5.0", "Accept": "image/*" },
+    });
+    clearTimeout(t);
+    if (!res.ok) throw new Error(`[IMAGE-GEN-PICSUM] HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 10000) throw new Error(`[IMAGE-GEN-PICSUM] ملف صغير: ${buf.byteLength}B`);
+    return buf;
+  } catch (e) {
+    clearTimeout(t);
+    const m = e instanceof Error ? e.message : String(e);
+    throw new Error(m.includes("abort") ? `[IMAGE-GEN-PICSUM] انتهت المهلة` : m);
+  }
+}
+
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  logInfo("[IMAGE-GEN] توليد الصورة (Pollinations AI)", { prompt: prompt.slice(0, 80) });
-  const timeouts = [25000, 35000, 50000, 70000, 90000];
+  logInfo("[IMAGE-GEN] بدء توليد الصورة", { prompt: prompt.slice(0, 80) });
+
+  const seed = Date.now();
   const errors: string[] = [];
-  for (let i = 0; i < timeouts.length; i++) {
+
+  // المحاولات: 3 مع Pollinations (مهلات متزايدة)
+  const pollinationsTimeouts = [30000, 45000, 60000];
+  for (let i = 0; i < pollinationsTimeouts.length; i++) {
     try {
-      const buf = await tryPollinations(prompt, timeouts[i]);
-      logInfo(`[IMAGE-GEN] ✅ نجح (${(buf.byteLength/1024).toFixed(1)}KB)`);
+      const buf = await tryPollinations(prompt, pollinationsTimeouts[i]);
+      logInfo(`[IMAGE-GEN] ✅ Pollinations نجح (${(buf.byteLength / 1024).toFixed(1)}KB)`);
       return buf;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      errors.push(m);
-      if (i < timeouts.length - 1) await new Promise((r) => setTimeout(r, 2000));
+      logWarning(`[IMAGE-GEN] Pollinations محاولة ${i + 1}: ${m}`);
+      errors.push(`Pollinations[${i+1}]: ${m}`);
+      if (i < pollinationsTimeouts.length - 1) await new Promise((r) => setTimeout(r, 3000));
     }
   }
-  throw new Error("[IMAGE-GEN] فشل بعد 5 محاولات: " + errors.join(" | "));
+
+  // Fallback: Picsum Photos
+  logWarning("[IMAGE-GEN] Pollinations فشل - جاري التحويل إلى Picsum Photos");
+  try {
+    const buf = await tryPicsum(seed, 20000);
+    logInfo(`[IMAGE-GEN] ✅ Picsum Photos نجح كـ fallback (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+    return buf;
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    errors.push(`Picsum: ${m}`);
+  }
+
+  throw new Error("[IMAGE-GEN] فشل كل providers: " + errors.join(" | "));
 }
 
 // ===== MERGE INTERFACES =====
