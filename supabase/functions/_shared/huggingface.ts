@@ -215,45 +215,89 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== IMAGE GENERATION - Pollinations AI + Picsum fallback =====
+// ===== IMAGE GENERATION =====
+// الترتيب: HuggingFace (POST → يتبع الـ prompt فعلاً) → Pollinations → Picsum
+// Pollinations يُرسل الـ prompt في URL → يُقطع إذا طال → يُرجع صور عشوائية
+// HuggingFace يُرسل الـ prompt في JSON body → لا يُقطع → صور مرتبطة بالموضوع
 
+// ─── Provider 1: HuggingFace Inference API ─────────────────────────
+async function tryHuggingFace(prompt: string, ms: number): Promise<ArrayBuffer> {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const res = await fetch(
+      "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell",
+      {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${HF_READ_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ inputs: prompt }),
+        signal: ctrl.signal,
+      }
+    );
+    clearTimeout(t);
+    if (res.status === 503) {
+      // النموذج يُحمَّل — انتظر وأعد
+      const info = await res.json().catch(() => ({}));
+      const wait = (info.estimated_time ?? 20) as number;
+      throw new Error(`HF model loading (${wait.toFixed(0)}s)`);
+    }
+    if (!res.ok) throw new Error(`HF HTTP ${res.status}: ${(await res.text()).slice(0, 100)}`);
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 4000) throw new Error(`HF صورة صغيرة: ${buf.byteLength}B`);
+    return buf;
+  } catch (e) {
+    clearTimeout(t);
+    const m = e instanceof Error ? e.message : String(e);
+    throw new Error(m.includes("abort") ? `HF انتهت المهلة (${ms/1000}s)` : m);
+  }
+}
+
+// ─── Provider 2: Pollinations AI ───────────────────────────────────
+// نأخذ أول 120 حرف من الـ prompt فقط لأن URL يُقطع إذا طال
 async function tryPollinations(prompt: string, ms: number): Promise<ArrayBuffer> {
   const seed = Date.now() + Math.floor(Math.random() * 99999);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?seed=${seed}&width=1280&height=720&nologo=true&model=flux`;
+  // نضع الكلمات المفتاحية الأهم في البداية (Pollinations يقرأ البداية فقط)
+  const shortPrompt = prompt.slice(0, 200);
+  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(shortPrompt)}?seed=${seed}&width=1280&height=720&nologo=true&model=flux&enhance=true`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0",
-        "Accept": "image/webp,image/png,image/*",
+        "User-Agent": "Mozilla/5.0 Chrome/120.0.0.0",
+        "Accept": "image/*",
         "Referer": "https://pollinations.ai/",
       },
     });
     clearTimeout(t);
-    if (!res.ok) throw new Error(`HTTP ${res.status} من pollinations.ai`);
+    if (!res.ok) throw new Error(`Pollinations HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 4000) throw new Error(`صورة صغيرة جداً: ${buf.byteLength}B`);
+    if (buf.byteLength < 4000) throw new Error(`Pollinations صورة صغيرة: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
     const m = e instanceof Error ? e.message : String(e);
-    throw new Error(m.includes("abort") ? `انتهت المهلة (${ms/1000}s)` : m);
+    throw new Error(m.includes("abort") ? `Pollinations انتهت المهلة (${ms/1000}s)` : m);
   }
 }
 
+// ─── Provider 3: Picsum (آخر ملجأ) ────────────────────────────────
 async function tryPicsum(seed: number, ms: number): Promise<ArrayBuffer> {
   const id = (Math.abs(seed) % 1000) + 1;
-  const url = `https://picsum.photos/seed/${id}/1280/720`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0" } });
+    const res = await fetch(`https://picsum.photos/seed/${id}/1280/720`, {
+      signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0" },
+    });
     clearTimeout(t);
     if (!res.ok) throw new Error(`Picsum HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 10000) throw new Error(`Picsum صورة صغيرة: ${buf.byteLength}B`);
+    if (buf.byteLength < 10000) throw new Error(`Picsum صغيرة: ${buf.byteLength}B`);
     return buf;
   } catch (e) {
     clearTimeout(t);
@@ -261,37 +305,57 @@ async function tryPicsum(seed: number, ms: number): Promise<ArrayBuffer> {
   }
 }
 
+// ─── generateImageWithFlux ─────────────────────────────────────────
 export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
-  logInfo("[IMAGE-GEN] بدء توليد الصورة", { prompt: prompt.slice(0, 80) });
-  const seed = Date.now();
+  logInfo("[IMAGE-GEN] بدء توليد الصورة", { prompt: prompt.slice(0, 100) });
   const errors: string[] = [];
 
-  // 3 محاولات مع Pollinations (مهل متزايدة)
-  for (const ms of [30000, 45000, 60000]) {
+  // 1. HuggingFace — يتبع الـ prompt كاملاً (POST body)
+  if (HF_READ_TOKEN) {
+    for (const ms of [45000, 70000]) {
+      try {
+        const buf = await tryHuggingFace(prompt, ms);
+        logInfo(`[IMAGE-GEN] ✅ HuggingFace (${(buf.byteLength/1024).toFixed(1)}KB)`);
+        return buf;
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        logWarning(`[IMAGE-GEN] HuggingFace فشل: ${m}`);
+        errors.push(`HF: ${m}`);
+        // إذا كان النموذج يُحمَّل، انتظر 20 ثانية وأعد مرة واحدة
+        if (m.includes("loading")) await new Promise(r => setTimeout(r, 20000));
+        else break; // خطأ آخر → انتقل مباشرة لـ Pollinations
+      }
+    }
+  }
+
+  // 2. Pollinations — مع الكلمات المفتاحية في البداية
+  logWarning("[IMAGE-GEN] التحويل إلى Pollinations");
+  for (const ms of [35000, 50000]) {
     try {
       const buf = await tryPollinations(prompt, ms);
       logInfo(`[IMAGE-GEN] ✅ Pollinations (${(buf.byteLength/1024).toFixed(1)}KB)`);
       return buf;
     } catch (e) {
       const m = e instanceof Error ? e.message : String(e);
-      logWarning(`[IMAGE-GEN] Pollinations فشل (${ms/1000}s): ${m}`);
-      errors.push(m);
-      await new Promise(r => setTimeout(r, 2000));
+      logWarning(`[IMAGE-GEN] Pollinations فشل: ${m}`);
+      errors.push(`Pollinations: ${m}`);
+      await new Promise(r => setTimeout(r, 3000));
     }
   }
 
-  // Fallback: Picsum Photos
-  logWarning("[IMAGE-GEN] التحويل إلى Picsum Photos كـ fallback");
+  // 3. Picsum — آخر ملجأ
+  logWarning("[IMAGE-GEN] التحويل إلى Picsum (آخر ملجأ)");
   try {
-    const buf = await tryPicsum(seed, 20000);
+    const buf = await tryPicsum(Date.now(), 20000);
     logInfo(`[IMAGE-GEN] ✅ Picsum fallback (${(buf.byteLength/1024).toFixed(1)}KB)`);
     return buf;
   } catch (e) {
     errors.push(`Picsum: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  throw new Error("[IMAGE-GEN] فشل كل providers:
-" + errors.join(" | "));
+  throw new Error("[IMAGE-GEN] فشل جميع providers:
+" + errors.join("
+"));
 }
 
 // ===== MERGE INTERFACES =====
