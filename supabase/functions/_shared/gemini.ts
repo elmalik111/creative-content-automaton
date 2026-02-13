@@ -71,172 +71,204 @@ export async function generateVoiceoverScript(
   return generateWithGemini(prompt);
 }
 
-// ===== HELPERS =====
-
-function parseImagePrompts(text: string, count: number): string[] {
-  const prompts: string[] = [];
-  for (const line of text.split("\n")) {
-    const t = line.trim().replace(/\*+/g, "");
-    if (!t) continue;
-    const m = t.match(/^(\d+)[.\)\-:]\s*(.+)/);
-    if (m && m[2]) {
-      const txt = m[2].trim();
-      if (txt.length > 15 && !/[\u0600-\u06FF]/.test(txt)) {
-        prompts.push(txt);
-      }
-    }
-  }
-  if (prompts.length === 0) {
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (t.length > 30 && !/[\u0600-\u06FF]/.test(t) && prompts.length < count) {
-        prompts.push(t.replace(/^[\d.\-\)\s*:]+/, "").trim());
-      }
-    }
-  }
-  return prompts.slice(0, count);
-}
-
-// ===== IMAGE PROMPTS =====
+// ===== IMAGE PROMPTS - IMPROVED VERSION =====
 export async function generateImagePrompts(
   script: string,
   sceneCount: number
 ): Promise<string[]> {
   const count = Math.max(1, Math.min(sceneCount || 3, 10));
 
-  // استراتيجية محسّنة: نطلب من Gemini تحليل السكربت وتوليد الـ prompts مباشرة
-  const imagePromptRequest = `أنت خبير في تحليل النصوص العربية وتوليد أوصاف بصرية دقيقة بالإنجليزية.
+  console.log(`[GEMINI] 🎯 Generating ${count} image prompts from Arabic script (${script.length} chars)`);
 
-النص العربي التالي هو سكربت صوتي لفيديو قصير:
+  // 🔧 FIXED: طلب واحد مباشر بدلاً من خطوتين منفصلتين
+  const imagePromptRequest = `أنت خبير في تحليل النصوص العربية وتوليد أوصاف الصور بالإنجليزية.
+
+اقرأ النص العربي التالي بعناية:
 
 """
 ${script}
 """
 
-مهمتك:
-1. اقرأ وافهم النص العربي بعمق
-2. حدد الموضوع الرئيسي والعناصر البصرية المهمة
-3. أنشئ EXACTLY ${count} وصف صورة (image prompts) بالإنجليزية فقط
+مهمتك: إنشاء EXACTLY ${count} وصف صورة (image prompt) بالإنجليزية فقط.
 
-⚠️ CRITICAL RULES:
-- كل prompt يجب أن يكون مرتبط مباشرة بمحتوى النص العربي
-- لا تكتب أوصاف عامة (مثل: طبيعة، سماء، مدينة عشوائية)
-- إذا كان النص عن شخصية تاريخية → اكتب عنها وعن عصرها
-- إذا كان عن حدث → اكتب عن الحدث ومكانه
-- إذا كان عن مكان → اكتب عن المكان وتفاصيله المحددة
-- إذا كان عن مفهوم → اكتب تمثيل بصري للمفهوم
+⚠️ قواعد صارمة:
+1. كل وصف يجب أن يكون مرتبط 100% بمحتوى النص العربي
+2. إذا النص عن "كرة القدم" → اكتب عن football/soccer (ليس مجرد "sports")
+3. إذا النص عن "حتشبسوت" → اكتب عن Queen Hatshepsut (ليس مجرد "ancient queen")
+4. إذا النص عن "الفضاء" → اكتب عن space/planets (ليس مجرد "sky")
+5. لا تكتب أوصاف عامة مثل: nature, sky, city, landscape
+6. كل وصف يجب أن يذكر الموضوع الرئيسي بالاسم
 
-FORMAT المطلوب:
-اكتب ${count} أسطر فقط، كل سطر:
-1. [English image prompt 50-80 words, cinematic, 4K, professional photography]
-2. [English image prompt 50-80 words, cinematic, 4K, professional photography]
+متطلبات كل وصف:
+- الطول: 50-80 كلمة
+- اللغة: إنجليزية فقط (NO ARABIC)
+- الجودة: cinematic 4K, professional photography or digital art
+- كل وصف يُظهر زاوية أو مشهد مختلف من نفس الموضوع
+
+التنسيق المطلوب:
+اكتب ${count} أسطر فقط، كل سطر بهذا الشكل:
+1. [وصف الصورة بالإنجليزية 50-80 كلمة]
+2. [وصف الصورة بالإنجليزية 50-80 كلمة]
 ...
 
-Requirements لكل prompt:
-- طول: 50-80 كلمة
-- لغة: إنجليزية فقط
-- جودة: cinematic 4K, professional photography or digital art
-- كل prompt يُظهر زاوية أو مشهد مختلف من نفس الموضوع
-- مرتبط بالنص العربي 100%
+ابدأ الآن - اكتب فقط الأوصاف المرقمة، بدون أي شرح أو مقدمة:`;
 
-ابدأ الآن - اكتب الـ ${count} prompts فقط، بدون شرح:`;
-
-  console.log(`[GEMINI] Requesting ${count} prompts directly from Arabic script`);
-  
   let result: string;
   try {
     result = await generateWithGemini(imagePromptRequest);
-    console.log(`[GEMINI] Raw response (${result.length} chars):`);
-    console.log(result.slice(0, 400));
+    console.log(`[GEMINI] 📥 Raw response (${result.length} chars)`);
+    console.log(`[GEMINI] Preview: ${result.slice(0, 200)}...`);
   } catch (e) {
-    console.error("[GEMINI] Failed to generate prompts:", e);
-    // Fallback strategy
-    return generateFallbackPrompts(script, count);
+    console.error("[GEMINI] ❌ Failed to generate prompts:", e);
+    // Fallback إلى استخراج كلمات مفتاحية
+    return await generateFallbackPromptsFromScript(script, count);
   }
 
-  let prompts = parseImagePrompts(result, count);
-  console.log(`[GEMINI] Parsed ${prompts.length}/${count} prompts`);
+  // 🔧 FIXED: استخراج محسّن يدعم أشكال متعددة
+  let prompts = extractImagePrompts(result, count);
+  console.log(`[GEMINI] ✅ Extracted ${prompts.length}/${count} prompts`);
 
-  // إذا كانت الـ prompts المستخرجة قليلة، نحاول استخراج إضافي
+  // إذا لم نحصل على العدد الكافي، نحاول استخراج إضافي
   if (prompts.length < count) {
-    console.warn(`[GEMINI] Got only ${prompts.length} prompts, extracting more...`);
+    console.warn(`[GEMINI] ⚠️ Only got ${prompts.length} prompts, need ${count}`);
     
-    // نحاول استخراج أي جملة إنجليزية طويلة
+    // محاولة استخراج أي جملة إنجليزية طويلة
     const lines = result.split("\n");
     for (const line of lines) {
       if (prompts.length >= count) break;
       
       const cleaned = line
         .trim()
-        .replace(/^[\d.\-\)\s*:]+/, "") // إزالة الترقيم
+        .replace(/^[\d.\-\)\s*:]+/, "")
         .replace(/\*+/g, "")
         .trim();
       
-      // نتحقق: إنجليزية، طويلة، غير موجودة
+      // تحقق: إنجليزية، طويلة، غير مكررة
       if (
         cleaned.length > 40 &&
-        !/[\u0600-\u06FF]/.test(cleaned) && // ليست عربية
+        !/[\u0600-\u06FF]/.test(cleaned) &&
         !prompts.includes(cleaned)
       ) {
         prompts.push(cleaned);
+        console.log(`[GEMINI] + Added extra prompt: ${cleaned.slice(0, 60)}...`);
       }
     }
   }
 
-  // إذا ما زلنا نحتاج المزيد، نستخدم fallback ذكي
+  // إذا ما زلنا نحتاج المزيد، استخدم fallback ذكي
   if (prompts.length < count) {
-    console.warn(`[GEMINI] Still need more prompts (${prompts.length}/${count}), using smart fallback`);
-    const fallbackPrompts = await generateFallbackPrompts(script, count - prompts.length);
+    console.warn(`[GEMINI] ⚠️ Still need ${count - prompts.length} more prompts, using smart fallback`);
+    const fallbackPrompts = await generateFallbackPromptsFromScript(script, count - prompts.length);
     prompts.push(...fallbackPrompts);
   }
 
+  // التأكد من عدم وجود نص عربي في النتيجة النهائية
+  prompts = prompts.map((prompt, idx) => {
+    if (/[\u0600-\u06FF]/.test(prompt)) {
+      console.warn(`[GEMINI] ⚠️ Prompt ${idx + 1} contains Arabic, using fallback`);
+      return `cinematic scene related to the topic, professional photography, 4K ultra HD, dramatic lighting, highly detailed`;
+    }
+    return prompt;
+  });
+
+  console.log(`[GEMINI] 🎉 Final result: ${prompts.length} prompts ready`);
   return prompts.slice(0, count);
 }
 
-// دالة مساعدة: توليد prompts احتياطية ذكية بناءً على السكربت
-async function generateFallbackPrompts(script: string, count: number): Promise<string[]> {
-  console.log(`[FALLBACK] Generating ${count} smart fallback prompts`);
+// 🔧 IMPROVED: دالة استخراج محسّنة
+function extractImagePrompts(text: string, count: number): string[] {
+  const prompts: string[] = [];
   
-  // نحاول استخراج كلمات مفتاحية من السكربت العربي
-  const keywordPrompt = `اقرأ هذا النص العربي واستخرج 5 كلمات مفتاحية بالإنجليزية تصف الموضوع الرئيسي:
+  // محاولة 1: استخراج من نص مرقم (1. 2. 3.)
+  const lines = text.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim().replace(/\*+/g, "");
+    if (!trimmed) continue;
+    
+    // أشكال الترقيم المختلفة: "1." "1)" "1-" "1:"
+    const match = trimmed.match(/^(\d+)[.\)\-:]\s*(.+)/);
+    if (match && match[2]) {
+      const promptText = match[2].trim();
+      // تحقق: إنجليزية، طويلة بما يكفي
+      if (promptText.length > 15 && !/[\u0600-\u06FF]/.test(promptText)) {
+        prompts.push(promptText);
+        console.log(`[EXTRACT] Found prompt ${match[1]}: ${promptText.slice(0, 60)}...`);
+      }
+    }
+  }
+  
+  // محاولة 2: إذا لم نجد أي شيء، ابحث عن جمل طويلة
+  if (prompts.length === 0) {
+    console.warn("[EXTRACT] No numbered prompts found, trying to extract long sentences");
+    for (const line of lines) {
+      const trimmed = line.trim().replace(/^[\d.\-\)\s*:]+/, "").trim();
+      if (trimmed.length > 30 && !/[\u0600-\u06FF]/.test(trimmed) && prompts.length < count) {
+        prompts.push(trimmed);
+        console.log(`[EXTRACT] Found sentence: ${trimmed.slice(0, 60)}...`);
+      }
+    }
+  }
+  
+  return prompts.slice(0, count);
+}
 
-${script.slice(0, 500)}
+// 🔧 NEW: fallback ذكي يستخرج كلمات مفتاحية من النص
+async function generateFallbackPromptsFromScript(
+  script: string,
+  count: number
+): Promise<string[]> {
+  console.log(`[FALLBACK] 🔄 Generating ${count} smart fallback prompts`);
+  
+  // محاولة استخراج كلمات مفتاحية من النص العربي
+  const keywordPrompt = `اقرأ هذا النص العربي واستخرج الموضوع الرئيسي والكلمات المفتاحية بالإنجليزية:
 
-اكتب 5 كلمات فقط بالإنجليزية، مفصولة بفواصل:`;
+${script.slice(0, 800)}
 
-  let keywords = "historical scene, ancient civilization, cultural heritage, dramatic moment, significant event";
+اكتب سطر واحد فقط بهذا الشكل:
+TOPIC: [الموضوع بالإنجليزية], KEYWORDS: [5 كلمات مفتاحية بالإنجليزية مفصولة بفواصل]
+
+مثال:
+TOPIC: football history, KEYWORDS: soccer ball, stadium, players, world cup, championship`;
+
+  let topic = "the subject";
+  let keywords = "cinematic scene, professional photography, detailed composition, dramatic atmosphere, 4K quality";
   
   try {
     const keywordResult = await generateWithGemini(keywordPrompt);
-    const extracted = keywordResult
-      .split("\n")[0]
-      .trim()
-      .replace(/[^\w\s,]/g, "");
+    console.log(`[FALLBACK] Keyword extraction result: ${keywordResult.slice(0, 150)}`);
     
-    if (extracted.length > 10 && !/[\u0600-\u06FF]/.test(extracted)) {
-      keywords = extracted;
-      console.log(`[FALLBACK] Extracted keywords: ${keywords}`);
+    const topicMatch = keywordResult.match(/TOPIC:\s*([^,\n]+)/i);
+    const keywordsMatch = keywordResult.match(/KEYWORDS:\s*(.+)/i);
+    
+    if (topicMatch?.[1]) {
+      topic = topicMatch[1].trim();
+      console.log(`[FALLBACK] ✅ Extracted topic: "${topic}"`);
+    }
+    
+    if (keywordsMatch?.[1]) {
+      keywords = keywordsMatch[1].trim();
+      console.log(`[FALLBACK] ✅ Extracted keywords: "${keywords}"`);
     }
   } catch (e) {
-    console.warn("[FALLBACK] Keyword extraction failed, using defaults");
+    console.warn("[FALLBACK] ⚠️ Keyword extraction failed, using generic fallback");
   }
 
   const prompts: string[] = [];
   const angles = [
     "dramatic wide establishing shot",
-    "intense close-up with shallow depth of field", 
+    "intense close-up with shallow depth of field",
     "cinematic low-angle heroic perspective",
-    "overhead aerial view showing scale",
-    "medium shot with emotional lighting",
-    "dynamic action shot with motion blur",
-    "intimate portrait with environmental context"
+    "overhead aerial view showing scale and context",
+    "medium shot with emotional dramatic lighting",
+    "dynamic action shot with motion and energy",
+    "intimate detailed portrait with environmental context"
   ];
 
   for (let i = 0; i < count; i++) {
     const angle = angles[i % angles.length];
-    const prompt = `${keywords}, ${angle}, cinematic lighting, epic atmosphere, highly detailed, 4K ultra HD, professional photography, dramatic composition, rich colors, photorealistic`;
+    const prompt = `${topic}, ${keywords}, ${angle}, cinematic 4K ultra HD, professional photography, highly detailed, dramatic composition, epic atmosphere, rich vibrant colors, photorealistic quality`;
     prompts.push(prompt);
-    console.log(`[FALLBACK] Prompt ${i + 1}: ${prompt.slice(0, 70)}...`);
+    console.log(`[FALLBACK] Prompt ${i + 1}: ${prompt.slice(0, 80)}...`);
   }
 
   return prompts;
