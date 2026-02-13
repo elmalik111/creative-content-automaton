@@ -11,7 +11,7 @@ function logError(message: string, error?: any) {
 }
 
 function logWarning(message: string, data?: any) {
-  console.warn(`[HF-WARNING] ${message}`, data ? JSON.stringify(data, null, 2) : '');
+  console.warn(`[HF-WARNING] ${message}`, data ? JSON.stringify(data, null, 2) : ''); 
 }
 
 // ===== URL HELPERS =====
