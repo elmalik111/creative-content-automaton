@@ -5,16 +5,14 @@ import { generateSpeech } from "../_shared/elevenlabs.ts";
 import { generateImageWithFlux, startMergeWithFFmpeg } from "../_shared/huggingface.ts";
 
 // =================================================================
-// ⚠️  السبب الجذري للـ freeze:
-//     processAIGeneration(...).catch(); return Response();
-//     → Supabase يُغلق الـ worker بعد return → background task تموت!
-//
-// الحل: EdgeRuntime.waitUntil() يُبقي الـ worker حياً حتى اكتمال الـ task
+// الحل الجذري لمشكلة الـ freeze:
+// نستخدم EdgeRuntime.waitUntil لإبقاء الـ worker حياً
+// بدون هذا، Supabase يُغلق الـ function بعد return Response
+// وتموت processAIGeneration في منتصفها
 // =================================================================
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
-interface AIGenerateRequest { job_id: string; }
 interface JobInputData {
   title: string;
   description: string;
@@ -30,79 +28,62 @@ interface StepIds {
   publishStep?: string;
 }
 
-// =================================================================
-// DB HELPERS
-// =================================================================
-async function createJobStep(
-  jobId: string, stepName: string, stepOrder: number
-): Promise<string | undefined> {
-  // upsert لتجنب duplicate error إذا استُدعيت الـ function مرتين
+async function createJobStep(jobId: string, stepName: string, stepOrder: number): Promise<string | undefined> {
   const { data, error } = await supabase
     .from("job_steps")
     .upsert(
       { job_id: jobId, step_name: stepName, step_order: stepOrder, status: "pending" },
-      { onConflict: "job_id,step_name", ignoreDuplicates: false }
+      { onConflict: "job_id,step_name" }
     )
     .select("id")
     .maybeSingle();
-
   if (error) {
-    console.error(`[AI-GEN] createJobStep(${stepName}) error:`, error.message);
-    // جلب الـ id إذا كان موجوداً
-    const { data: existing } = await supabase
-      .from("job_steps").select("id")
+    const { data: ex } = await supabase.from("job_steps").select("id")
       .eq("job_id", jobId).eq("step_name", stepName).maybeSingle();
-    return existing?.id;
+    return ex?.id;
   }
   return data?.id;
 }
 
-async function updateJobStep(
-  stepId: string | undefined, status: string,
-  errorMessage?: string, outputData?: Record<string, unknown>
-) {
-  if (!stepId) return;
-  const updates: Record<string, unknown> = { status };
-  if (status === "processing")                         updates.started_at    = new Date().toISOString();
-  if (status === "completed" || status === "failed")   updates.completed_at  = new Date().toISOString();
-  if (errorMessage)  updates.error_message = errorMessage;
-  if (outputData)    updates.output_data   = outputData;
-  await supabase.from("job_steps").update(updates).eq("id", stepId);
+async function updateStep(id: string | undefined, status: string, err?: string, out?: Record<string,unknown>) {
+  if (!id) return;
+  const u: Record<string,unknown> = { status };
+  if (status === "processing") u.started_at = new Date().toISOString();
+  if (status === "completed" || status === "failed") u.completed_at = new Date().toISOString();
+  if (err) u.error_message = err;
+  if (out) u.output_data = out;
+  await supabase.from("job_steps").update(u).eq("id", id);
 }
 
-async function updateJobProgress(jobId: string, progress: number, status?: string) {
-  const update: Record<string, unknown> = { progress };
-  if (status) update.status = status;
-  await supabase.from("jobs").update(update).eq("id", jobId);
+async function updateProgress(jobId: string, progress: number, status?: string) {
+  const u: Record<string,unknown> = { progress };
+  if (status) u.status = status;
+  await supabase.from("jobs").update(u).eq("id", jobId);
 }
 
-// =================================================================
-// SERVE HANDLER
 // =================================================================
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   let jobId = "";
-  try {
-    const body: AIGenerateRequest = await req.json();
-    jobId = body.job_id;
 
+  try {
+    const body = await req.json();
+    jobId = body.job_id;
     if (!jobId) throw new Error("job_id مطلوب");
 
-    // ── 1. تحديث status فوراً (في الـ serve handler، قبل أي شيء) ──
-    await supabase.from("jobs")
-      .update({ status: "processing", progress: 1 })
-      .eq("id", jobId);
-    console.log(`[AI-GEN] ✅ job ${jobId} → processing`);
+    console.log(`[AI-GEN] ▶ بدء معالجة المهمة: ${jobId}`);
 
-    // ── 2. جلب تفاصيل المهمة ──────────────────────────────────────
-    const { data: job, error: jobError } = await supabase
-      .from("jobs").select("*").eq("id", jobId).single();
-    if (jobError || !job) throw new Error(`Job not found: ${jobId}`);
+    // تحديث فوري إلى processing
+    await supabase.from("jobs").update({ status: "processing", progress: 1 }).eq("id", jobId);
+
+    // جلب المهمة
+    const { data: job, error: jobErr } = await supabase.from("jobs").select("*").eq("id", jobId).single();
+    if (jobErr || !job) throw new Error(`المهمة غير موجودة: ${jobId}`);
 
     const inputData = job.input_data as JobInputData;
 
-    // ── 3. إنشاء خطوات المهمة ────────────────────────────────────
+    // إنشاء الخطوات
     const steps: StepIds = {
       scriptStep:  await createJobStep(jobId, "script_generation", 1),
       voiceStep:   await createJobStep(jobId, "voice_generation",  2),
@@ -110,24 +91,18 @@ serve(async (req) => {
       mergeStep:   await createJobStep(jobId, "merge",             4),
       publishStep: await createJobStep(jobId, "publishing",        5),
     };
-    console.log(`[AI-GEN] ✅ steps: ${JSON.stringify(steps)}`);
+    console.log(`[AI-GEN] ✅ steps created`);
 
-    // ── 4. تشغيل المعالجة مع waitUntil ───────────────────────────
-    const task = processAIGeneration(jobId, inputData, job.source_url, steps);
+    // تشغيل المعالجة
+    const task = processJob(jobId, inputData, job.source_url, steps);
 
+    // الحل الجذري: EdgeRuntime.waitUntil يُبقي الـ worker حياً
     if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
-      // ✅ Supabase Deno Edge: يُبقي الـ worker حياً حتى اكتمال المعالجة
       EdgeRuntime.waitUntil(task);
-      console.log("[AI-GEN] ✅ استخدام EdgeRuntime.waitUntil");
     } else {
-      // Fallback: نتابع بدون ضمان (قد يُقتل قبل الاكتمال)
-      task.catch((e) => {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("[AI-GEN] ❌ task crash:", msg);
-        supabase.from("jobs")
-          .update({ status: "failed", error_message: msg })
-          .eq("id", jobId).then(() => {});
-      });
+      // إذا EdgeRuntime غير متاح، ننتظر الـ task قبل الـ return
+      // هذا يمنع Supabase من قتل الـ worker
+      await task;
     }
 
     return new Response(
@@ -136,192 +111,106 @@ serve(async (req) => {
     );
 
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    console.error("[AI-GEN] ❌ serve error:", error.message);
-
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[AI-GEN] ❌ خطأ: ${msg}`);
     if (jobId) {
-      await supabase.from("jobs")
-        .update({ status: "failed", error_message: error.message })
-        .eq("id", jobId);
+      await supabase.from("jobs").update({ status: "failed", error_message: msg }).eq("id", jobId).catch(() => {});
     }
-
     return new Response(
-      JSON.stringify({ error: error.message }),
+      JSON.stringify({ error: msg }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });
 
 // =================================================================
-// MAIN PROCESSING
-// =================================================================
-async function processAIGeneration(
-  jobId: string,
-  inputData: JobInputData,
-  sourceUrl: string | null,
-  steps: StepIds
-) {
+async function processJob(jobId: string, inputData: JobInputData, sourceUrl: string|null, steps: StepIds) {
   try {
-    await updateJobProgress(jobId, 5, "processing");
-    console.log("[AI-GEN] === بدء المعالجة ===");
+    await updateProgress(jobId, 5, "processing");
 
-    // ── خطوة 1: السكريبت ─────────────────────────────────────────
-    await updateJobStep(steps.scriptStep, "processing");
-    console.log("[AI-GEN] 📝 توليد السكريبت...");
-    const script = await generateVoiceoverScript(
-      inputData.title, inputData.description, inputData.duration
-    );
-    console.log(`[AI-GEN] ✅ السكريبت (${script.length} حرف): ${script.slice(0, 100)}`);
-    await updateJobStep(steps.scriptStep, "completed", undefined, { script });
-    await updateJobProgress(jobId, 15);
+    // ─── السكريبت ─────────────────────────────────────────────────
+    await updateStep(steps.scriptStep, "processing");
+    const script = await generateVoiceoverScript(inputData.title, inputData.description, inputData.duration);
+    console.log(`[AI-GEN] ✅ script: ${script.slice(0,80)}`);
+    await updateStep(steps.scriptStep, "completed", undefined, { script });
+    await updateProgress(jobId, 15);
 
-    // ── خطوة 2: الصوت ───────────────────────────────────────────
-    await updateJobStep(steps.voiceStep, "processing");
-    console.log("[AI-GEN] 🎙️ توليد الصوت...");
-    const voiceId = inputData.voice_type === "female_arabic"
-      ? "EXAVITQu4vr4xnSDxMaL"   // Sarah
-      : "onwK4e9ZLuTAKqWW03F9";  // Daniel
-
+    // ─── الصوت ────────────────────────────────────────────────────
+    await updateStep(steps.voiceStep, "processing");
+    const voiceId = inputData.voice_type === "female_arabic" ? "EXAVITQu4vr4xnSDxMaL" : "onwK4e9ZLuTAKqWW03F9";
     const audioBuffer = await generateSpeech(script, voiceId);
     if (!audioBuffer) throw new Error("فشل توليد الصوت");
 
-    const audioFileName = `${jobId}/audio.mp3`;
-    const { error: audioUploadErr } = await supabase.storage
-      .from("temp-files")
-      .upload(audioFileName, audioBuffer, { contentType: "audio/mpeg", upsert: true });
-    if (audioUploadErr) throw new Error(`فشل رفع الصوت: ${audioUploadErr.message}`);
+    const audioFile = `${jobId}/audio.mp3`;
+    const { error: audioErr } = await supabase.storage.from("temp-files")
+      .upload(audioFile, audioBuffer, { contentType: "audio/mpeg", upsert: true });
+    if (audioErr) throw new Error(`فشل رفع الصوت: ${audioErr.message}`);
 
-    const { data: audioUrlData } = supabase.storage.from("temp-files").getPublicUrl(audioFileName);
-    console.log(`[AI-GEN] ✅ الصوت: ${audioUrlData.publicUrl}`);
-    await updateJobStep(steps.voiceStep, "completed", undefined, { audio_url: audioUrlData.publicUrl });
-    await updateJobProgress(jobId, 35);
+    const { data: audioUrl } = supabase.storage.from("temp-files").getPublicUrl(audioFile);
+    console.log(`[AI-GEN] ✅ audio: ${audioUrl.publicUrl}`);
+    await updateStep(steps.voiceStep, "completed", undefined, { audio_url: audioUrl.publicUrl });
+    await updateProgress(jobId, 35);
 
-    // ── خطوة 3: الصور ───────────────────────────────────────────
-    await updateJobStep(steps.imageStep, "processing");
-    const sceneCount = Math.max(1, Math.min(inputData.scene_count || 3, 10));
-    console.log(`[AI-GEN] 🖼️ طلب ${sceneCount} صور...`);
+    // ─── الصور ────────────────────────────────────────────────────
+    await updateStep(steps.imageStep, "processing");
+    const count = Math.max(1, Math.min(inputData.scene_count || 3, 10));
+    const prompts = await generateImagePrompts(script, count);
+    console.log(`[AI-GEN] ✅ prompts (${prompts.length}): ${prompts.map((p,i)=>`[${i+1}]${p.slice(0,60)}`).join(' | ')}`);
 
-    const imagePrompts = await generateImagePrompts(script, sceneCount);
-    console.log(`[AI-GEN] ✅ prompts (${imagePrompts.length}/${sceneCount}):`);
-    imagePrompts.forEach((p, i) => console.log(`  [${i+1}] ${p}`));
+    if (prompts.length === 0) throw new Error("لم يُولَّد أي prompt للصور");
 
-    if (imagePrompts.length === 0) {
-      throw new Error(`generateImagePrompts أرجع 0 prompts! sceneCount=${sceneCount}`);
-    }
-
-    await updateJobProgress(jobId, 40);
+    await updateProgress(jobId, 40);
     const imageUrls: string[] = [];
-    const progressPerImage = 30 / sceneCount;
 
-    for (let i = 0; i < imagePrompts.length; i++) {
-      const prompt = imagePrompts[i];
-      console.log(`[AI-GEN] 🖼️ توليد صورة ${i+1}/${imagePrompts.length}`);
-      console.log(`[AI-GEN]   prompt: ${prompt}`);
-
-      let imageBuffer: ArrayBuffer;
+    for (let i = 0; i < prompts.length; i++) {
+      console.log(`[AI-GEN] 🖼 صورة ${i+1}/${prompts.length}: ${prompts[i].slice(0,80)}`);
       try {
-        imageBuffer = await generateImageWithFlux(prompt);
-      } catch (imgErr) {
-        const msg = imgErr instanceof Error ? imgErr.message : String(imgErr);
-        console.error(`[AI-GEN] ❌ فشل الصورة ${i+1}: ${msg}`);
-        continue;
+        const buf = await generateImageWithFlux(prompts[i]);
+        const imgFile = `${jobId}/image_${i}.jpg`;
+        const { error: imgErr } = await supabase.storage.from("temp-files")
+          .upload(imgFile, buf, { contentType: "image/jpeg", upsert: true });
+        if (imgErr) { console.error(`[AI-GEN] ❌ رفع صورة ${i+1}: ${imgErr.message}`); continue; }
+        const { data: imgUrl } = supabase.storage.from("temp-files").getPublicUrl(imgFile);
+        imageUrls.push(imgUrl.publicUrl);
+        console.log(`[AI-GEN] ✅ صورة ${i+1}: ${imgUrl.publicUrl}`);
+      } catch (e) {
+        console.error(`[AI-GEN] ❌ صورة ${i+1}: ${e instanceof Error ? e.message : e}`);
       }
-
-      const imageFileName = `${jobId}/image_${i}.jpg`;
-      const { error: imgUploadErr } = await supabase.storage
-        .from("temp-files")
-        .upload(imageFileName, imageBuffer, { contentType: "image/jpeg", upsert: true });
-
-      if (imgUploadErr) {
-        console.error(`[AI-GEN] ❌ فشل رفع الصورة ${i+1}:`, imgUploadErr.message);
-        continue;
-      }
-
-      const { data: imgUrlData } = supabase.storage.from("temp-files").getPublicUrl(imageFileName);
-      console.log(`[AI-GEN] ✅ صورة ${i+1}: ${imgUrlData.publicUrl}`);
-      imageUrls.push(imgUrlData.publicUrl);
-      await updateJobProgress(jobId, 40 + (i + 1) * progressPerImage);
+      await updateProgress(jobId, 40 + (i+1) * (30 / count));
     }
 
     if (imageUrls.length === 0) throw new Error("فشل توليد جميع الصور");
+    await updateStep(steps.imageStep, "completed", undefined, { image_urls: imageUrls });
+    await updateProgress(jobId, 75);
 
-    await updateJobStep(steps.imageStep, "completed", undefined, { image_urls: imageUrls });
-    await updateJobProgress(jobId, 75);
+    // ─── الدمج ────────────────────────────────────────────────────
+    await updateStep(steps.mergeStep, "processing");
+    const merge = await startMergeWithFFmpeg({ images: imageUrls, audio: audioUrl.publicUrl, output_format: "mp4" });
+    console.log(`[AI-GEN] merge: ${JSON.stringify(merge)}`);
 
-    // ── خطوة 4: الدمج ───────────────────────────────────────────
-    await updateJobStep(steps.mergeStep, "processing");
-    console.log("[AI-GEN] 🎬 بدء دمج الوسائط...");
+    if (merge.status === "failed") throw new Error(merge.error || "فشل الدمج");
 
-    const mergeStart = await startMergeWithFFmpeg({
-      images: imageUrls,
-      audio: audioUrlData.publicUrl,
-      output_format: "mp4",
-    });
-    console.log("[AI-GEN] merge start:", JSON.stringify(mergeStart));
-
-    if (mergeStart.status === "failed") throw new Error(mergeStart.error || "فشل دمج الوسائط");
-
-    if (mergeStart.output_url) {
-      await updateJobStep(steps.mergeStep, "completed", undefined, { output_url: mergeStart.output_url });
-      await updateJobStep(steps.publishStep, "completed", undefined, { video_url: mergeStart.output_url });
-      await supabase.from("jobs")
-        .update({ status: "completed", progress: 100, output_url: mergeStart.output_url })
-        .eq("id", jobId);
-      console.log(`[AI-GEN] ✅ اكتمل! ${mergeStart.output_url}`);
+    if (merge.output_url) {
+      await updateStep(steps.mergeStep, "completed", undefined, { output_url: merge.output_url });
+      await updateStep(steps.publishStep, "completed", undefined, { video_url: merge.output_url });
+      await supabase.from("jobs").update({ status: "completed", progress: 100, output_url: merge.output_url }).eq("id", jobId);
+      console.log(`[AI-GEN] ✅ اكتمل: ${merge.output_url}`);
       return;
     }
 
-    if (!mergeStart.job_id) throw new Error("لم يُرجع merge job_id");
-
-    await updateJobStep(steps.mergeStep, "processing", undefined, {
-      provider: "ffmpeg-space",
-      provider_job_id: mergeStart.job_id,
-      stage: "queued",
-    });
-    await updateJobProgress(jobId, 78);
-    console.log(`[AI-GEN] ✅ merge queued: ${mergeStart.job_id}`);
+    if (!merge.job_id) throw new Error("لم يُرجع merge job_id");
+    await updateStep(steps.mergeStep, "processing", undefined, { provider: "ffmpeg-space", provider_job_id: merge.job_id, stage: "queued" });
+    await updateProgress(jobId, 78);
+    console.log(`[AI-GEN] ✅ merge queued: ${merge.job_id}`);
 
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
-    console.error("[AI-GEN] ❌ processAIGeneration error:", error.message);
-
-    // تحديث أي step في processing إلى failed
-    for (const stepId of Object.values(steps)) {
-      if (!stepId) continue;
-      const { data } = await supabase.from("job_steps")
-        .select("status").eq("id", stepId).maybeSingle();
-      if (data?.status === "processing") {
-        await updateJobStep(stepId, "failed", error.message);
-      }
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[AI-GEN] ❌ processJob error: ${msg}`);
+    for (const id of Object.values(steps)) {
+      if (!id) continue;
+      const { data } = await supabase.from("job_steps").select("status").eq("id", id).maybeSingle();
+      if (data?.status === "processing") await updateStep(id, "failed", msg);
     }
-
-    await supabase.from("jobs")
-      .update({ status: "failed", error_message: error.message })
-      .eq("id", jobId);
-
-    // إشعار Telegram
-    if (sourceUrl?.startsWith("telegram:")) {
-      const chatId = parseInt(sourceUrl.replace("telegram:", ""));
-      await sendTelegramFailureNotification(chatId, jobId, error.message).catch(() => {});
-    }
+    await supabase.from("jobs").update({ status: "failed", error_message: msg }).eq("id", jobId);
   }
-}
-
-// =================================================================
-// TELEGRAM
-// =================================================================
-async function sendTelegramFailureNotification(chatId: number, jobId: string, error: string) {
-  const { data: tokenSetting } = await supabase
-    .from("settings").select("value").eq("key", "telegram_token").maybeSingle();
-  if (!tokenSetting?.value) return;
-
-  await fetch(`https://api.telegram.org/bot${tokenSetting.value}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text: `❌ فشل في إنشاء الفيديو\n\n🔴 رقم المهمة: ${jobId.slice(0, 8)}\n⚠️ الخطأ: ${error}\n\nحاول مرة أخرى.`,
-      parse_mode: "HTML",
-    }),
-  });
 }
