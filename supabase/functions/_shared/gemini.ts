@@ -2,12 +2,12 @@ const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const GEMINI_API_KEY  = Deno.env.get("GEMINI_API_KEY");
 
 // =================================================================
-// CORE: generateWithGemini
+// CORE
 // =================================================================
 export async function generateWithGemini(prompt: string): Promise<string> {
   if (LOVABLE_API_KEY) return generateWithLovableGateway(prompt);
   if (GEMINI_API_KEY)  return generateWithDirectGemini(prompt);
-  throw new Error("No AI API key configured (LOVABLE_API_KEY or GEMINI_API_KEY required)");
+  throw new Error("No AI API key (LOVABLE_API_KEY or GEMINI_API_KEY required)");
 }
 
 async function generateWithLovableGateway(prompt: string): Promise<string> {
@@ -19,7 +19,7 @@ async function generateWithLovableGateway(prompt: string): Promise<string> {
       messages: [{ role: "user", content: prompt }],
     }),
   });
-  if (!res.ok) throw new Error(`Lovable Gateway error ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Lovable Gateway ${res.status}: ${await res.text()}`);
   const d = await res.json();
   return d.choices?.[0]?.message?.content ?? "";
 }
@@ -36,7 +36,7 @@ async function generateWithDirectGemini(prompt: string): Promise<string> {
       }),
     }
   );
-  if (!res.ok) throw new Error(`Gemini API error ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${await res.text()}`);
   interface GeminiResp { candidates: Array<{ content: { parts: Array<{ text: string }> } }> }
   const d: GeminiResp = await res.json();
   return d.candidates[0]?.content?.parts[0]?.text ?? "";
@@ -65,119 +65,125 @@ export async function generateVoiceoverScript(
 }
 
 // =================================================================
-// HELPERS
-// =================================================================
-function parsePromptList(text: string, count: number): string[] {
-  const out: string[] = [];
-  for (const raw of text.split("\n")) {
-    const line = raw.trim().replace(/\*+/g, "");
-    if (!line) continue;
-    // أشكال: "1. " | "1) " | "1- " | "1: "
-    const m = line.match(/^\d+[.):\-]\s*(.+)/);
-    const candidate = m ? m[1].trim() : "";
-    if (candidate.length > 20 && !/[\u0600-\u06FF]/.test(candidate)) {
-      out.push(candidate);
-      if (out.length === count) break;
-    }
-  }
-  // إذا فشل parsing المرقّم، خذ أي سطر إنجليزي طويل
-  if (out.length === 0) {
-    for (const raw of text.split("\n")) {
-      const line = raw.trim();
-      if (line.length > 30 && !/[\u0600-\u06FF]/.test(line)) {
-        out.push(line.replace(/^\d+[.):\-]\s*/, "").trim());
-        if (out.length === count) break;
-      }
-    }
-  }
-  return out;
-}
-
-// =================================================================
-// IMAGE PROMPTS — نهج ثنائي المرحلة
+// IMAGE PROMPTS — نهج مباشر وموثوق
 // =================================================================
 export async function generateImagePrompts(
   script: string,
   sceneCount: number
 ): Promise<string[]> {
   const count = Math.max(1, Math.min(sceneCount || 3, 10));
+  console.log(`[GEMINI] generateImagePrompts: count=${count}`);
+  console.log(`[GEMINI] script (أول 200 حرف): ${script.slice(0, 200)}`);
 
-  // ─── المرحلة 1: استخراج الموضوع من السكريبت ───────────────────
-  // هذه المرحلة هي جوهر الإصلاح:
-  // بدلاً من إرسال النص العربي مباشرة، نستخرج منه أولاً:
-  //   SUBJECT  - الموضوع الرئيسي بالإنجليزية
-  //   ELEMENTS - العناصر البصرية الرئيسية
-  //   MOOD     - الطابع البصري
-
+  // ─── خطوة 1: استخرج الموضوع بالإنجليزية ────────────────────────
+  // هذه الخطوة ضرورية لأن Pollinations لا يفهم العربية جيداً
   const extractPrompt =
-    "You are a visual researcher. Read the following Arabic text and extract its core visual identity.\n\n" +
-    "Arabic text:\n" +
-    "---\n" +
-    script.slice(0, 800) +
-    "\n---\n\n" +
-    "Respond with EXACTLY these 3 lines and nothing else:\n" +
-    "SUBJECT: <the specific main subject in English — e.g. 'Hatshepsut, female pharaoh of ancient Egypt' or 'climate change effects on coral reefs'>\n" +
-    "ELEMENTS: <5 concrete visual elements directly from the text, comma-separated in English>\n" +
-    "MOOD: <visual mood in English — e.g. 'epic historical, golden tones, dramatic shadows'>";
+    "Read this Arabic script and respond with ONLY these 3 lines in English:\n" +
+    "TOPIC: [the main subject/topic in 3-8 English words]\n" +
+    "VISUALS: [5 specific visual elements from the content, comma-separated in English]\n" +
+    "STYLE: [visual style, e.g. 'historical documentary, dramatic lighting']\n\n" +
+    "Arabic script:\n" + script.slice(0, 600) + "\n\n" +
+    "Respond with ONLY the 3 lines above. No extra text.";
 
-  let subject  = "";
-  let elements = "";
-  let mood     = "cinematic, dramatic, 4K";
+  let topic   = "";
+  let visuals = "";
+  let style   = "cinematic, 4K, dramatic lighting";
 
   try {
     const raw = await generateWithGemini(extractPrompt);
-    console.log("[GEMINI-EXTRACT] raw:", raw.slice(0, 250));
-    const sMatch = raw.match(/SUBJECT:\s*(.+)/i);
-    const eMatch = raw.match(/ELEMENTS:\s*(.+)/i);
-    const mMatch = raw.match(/MOOD:\s*(.+)/i);
-    subject  = sMatch?.[1]?.trim() ?? "";
-    elements = eMatch?.[1]?.trim() ?? "";
-    mood     = mMatch?.[1]?.trim() || mood;
-    console.log(`[GEMINI-EXTRACT] subject="${subject}" | elements="${elements}" | mood="${mood}"`);
+    console.log(`[GEMINI] extract raw: ${raw.slice(0, 300)}`);
+
+    const tLine = raw.match(/TOPIC:\s*(.+)/i)?.[1]?.trim() ?? "";
+    const vLine = raw.match(/VISUALS:\s*(.+)/i)?.[1]?.trim() ?? "";
+    const sLine = raw.match(/STYLE:\s*(.+)/i)?.[1]?.trim() ?? "";
+
+    if (tLine.length > 2) topic   = tLine;
+    if (vLine.length > 2) visuals = vLine;
+    if (sLine.length > 2) style   = sLine;
+
+    console.log(`[GEMINI] topic="${topic}" | visuals="${visuals}" | style="${style}"`);
   } catch (e) {
-    console.warn("[GEMINI-EXTRACT] failed:", e instanceof Error ? e.message : e);
+    console.error("[GEMINI] extract failed:", e instanceof Error ? e.message : e);
   }
 
-  // إذا فشل الاستخراج، نستخدم النص كما هو
-  const topicContext = subject
-    ? "VIDEO TOPIC: " + subject + "\nKEY VISUALS: " + (elements || subject) + "\nMOOD: " + mood
-    : "VIDEO SCRIPT (Arabic): " + script.slice(0, 500);
+  // ─── خطوة 2: اطلب الـ prompts بشكل واضح ────────────────────────
+  const topicLine = topic
+    ? `The video is about: "${topic}". Key visual elements: ${visuals || topic}.`
+    : `Based on this Arabic voiceover: "${script.slice(0, 300)}"`;
 
-  // ─── المرحلة 2: توليد الـ prompts مرتكزة على الموضوع ──────────
-  const imagePrompt =
-    "You are an expert Flux AI image prompt engineer.\n\n" +
-    topicContext + "\n\n" +
-    "Write EXACTLY " + count + " image prompts in ENGLISH ONLY.\n\n" +
-    "CRITICAL RULES:\n" +
-    "1. Every prompt MUST be about: " + (subject || "the video topic above") + "\n" +
-    "2. NEVER use generic scenes (no random nature, sky, city, or abstract backgrounds)\n" +
-    "3. Each prompt MUST include the specific subject from above\n" +
-    "4. Length: 60-90 words per prompt\n" +
-    "5. Style: cinematic 4K, dramatic lighting, hyper-detailed\n" +
-    "6. Each prompt shows a DIFFERENT aspect/angle of the same topic\n" +
-    "7. Output ONLY a numbered list — no headers, no explanations\n\n" +
+  const imageGenPrompt =
+    "You are an AI image prompt engineer for Pollinations.ai (Flux model).\n\n" +
+    topicLine + "\n\n" +
+    "Write EXACTLY " + count + " image generation prompts.\n\n" +
+    "STRICT RULES:\n" +
+    "- Write in ENGLISH ONLY\n" +
+    "- Each prompt MUST visually depict: " + (topic || "the topic above") + "\n" +
+    "- NO generic scenes: no random nature, no empty sky, no unrelated cities\n" +
+    "- Each prompt: 40-70 words\n" +
+    "- Include: specific subject + setting + lighting + style\n" +
+    "- Numbered list: 1. ... 2. ... etc.\n" +
+    "- Output ONLY the numbered list, nothing else\n\n" +
     "PROMPTS:";
 
-  console.log(`[GEMINI-IMAGE] Requesting ${count} prompts for: "${subject.slice(0, 60)}"`);
-  const result = await generateWithGemini(imagePrompt);
-  console.log(`[GEMINI-IMAGE] Response ${result.length}ch: ${result.slice(0, 250)}`);
+  console.log(`[GEMINI] requesting ${count} prompts for topic: "${topic}"`);
 
-  const prompts = parsePromptList(result, count);
-  console.log(`[GEMINI-IMAGE] Parsed ${prompts.length}/${count}`);
+  let result = "";
+  try {
+    result = await generateWithGemini(imageGenPrompt);
+    console.log(`[GEMINI] raw prompts (${result.length} chars):\n${result}`);
+  } catch (e) {
+    console.error("[GEMINI] image prompt generation failed:", e instanceof Error ? e.message : e);
+  }
 
-  // ─── Fallback: يستخدم الموضوع المستخرج — لا طبيعة عشوائية ─────
-  const angles = [
-    "wide establishing shot", "dramatic close-up", "medium shot with depth",
-    "overhead aerial view",   "silhouette against dramatic sky",
+  // ─── خطوة 3: parse الـ prompts ──────────────────────────────────
+  const prompts: string[] = [];
+
+  for (const line of result.split("\n")) {
+    const clean = line.trim().replace(/\*+/g, "").replace(/^#+\s*/, "");
+    if (!clean) continue;
+
+    // أشكال: "1. " | "1) " | "1- " | "1: "
+    const m = clean.match(/^\d+[.):\-]\s*(.+)/);
+    const candidate = m ? m[1].trim() : "";
+
+    if (candidate.length > 20 && !/[\u0600-\u06FF]/.test(candidate)) {
+      prompts.push(candidate);
+      if (prompts.length === count) break;
+    }
+  }
+
+  // إذا فشل parsing المرقّم، خذ أي سطر إنجليزي طويل
+  if (prompts.length === 0 && result.length > 0) {
+    console.warn("[GEMINI] numbered parsing فشل، محاولة fallback parsing");
+    for (const line of result.split("\n")) {
+      const t = line.trim().replace(/\*+/g, "");
+      if (t.length > 30 && !/[\u0600-\u06FF]/.test(t)) {
+        prompts.push(t.replace(/^\d+[.):\-]\s*/, "").trim());
+        if (prompts.length === count) break;
+      }
+    }
+  }
+
+  console.log(`[GEMINI] prompts parsed: ${prompts.length}/${count}`);
+  prompts.forEach((p, i) => console.log(`  [${i+1}] ${p.slice(0, 80)}`));
+
+  // ─── Fallback: يستخدم الـ topic — لا طبيعة عشوائية ─────────────
+  const fallbackAngles = [
+    "wide establishing shot",
+    "dramatic close-up detail",
+    "medium shot with depth of field",
+    "overhead aerial perspective",
+    "silhouette with dramatic backlight",
   ];
+
   while (prompts.length < count) {
     const i  = prompts.length;
-    const fb = subject
-      ? subject + ", " + (elements.split(",")[i % 3] || elements) + ", " +
-        angles[i % angles.length] + ", cinematic 4K, dramatic lighting, hyper-detailed, " + mood
-      : "Cinematic " + angles[i % angles.length] + ", dramatic lighting, 4K";
-    console.warn(`[GEMINI-IMAGE] fallback[${i+1}]: ${fb.slice(0, 80)}`);
-    prompts.push(fb);
+    const angle = fallbackAngles[i % fallbackAngles.length];
+    const fallback = topic
+      ? `${topic}, ${visuals.split(",")[i % 3] || visuals || "detailed scene"}, ${angle}, ${style}, hyper-detailed, 8K`
+      : `Cinematic scene, ${angle}, dramatic lighting, 4K, professional photography`;
+    console.warn(`[GEMINI] fallback[${i+1}]: ${fallback.slice(0, 80)}`);
+    prompts.push(fallback);
   }
 
   return prompts;
