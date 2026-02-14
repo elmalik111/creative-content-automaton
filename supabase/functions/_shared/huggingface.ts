@@ -11,7 +11,7 @@ function logError(message: string, error?: any) {
 }
 
 function logWarning(message: string, data?: any) {
-  console.warn(`[HF-WARNING] ${message}`, data ? JSON.stringify(data, null, 2) : ''); 
+  console.warn(`[HF-WARNING] ${message}`, data ? JSON.stringify(data, null, 2) : '');
 }
 
 // ===== URL HELPERS =====
@@ -215,21 +215,20 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 
-// ===== IMAGE GENERATION =====
-// Pollinations gen.pollinations.ai — بـ API key + نموذج gptimage
-// بدون API key: Pollinations يُرجع صور عشوائية من cache
-// بـ sk_ key: يُنفّذ الـ prompt فعلاً
+// ===== IMAGE GENERATION — Pollinations فقط =====
+// gen.pollinations.ai مع API key → يُنفّذ الـ prompt فعلاً
+// بدون API key → صور cache عشوائية (المشكلة القديمة)
 
 const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "sk_E7DZagW8HKHCBUrMJjXm8bAhI2O1Pye9";
 
-// ─── Provider 1: Pollinations gptimage (دقيق، يتبع الـ prompt) ────
-async function tryPollinationsGptImage(prompt: string, ms: number): Promise<ArrayBuffer> {
-  // gptimage = GPT-4o image generation — الأدق في Pollinations
-  const encodedPrompt = encodeURIComponent(prompt.slice(0, 500));
+async function tryPollinationsModel(prompt: string, model: string, ms: number): Promise<ArrayBuffer> {
   const seed = Math.floor(Math.random() * 2147483647);
-  const url =
-    `https://gen.pollinations.ai/image/${encodedPrompt}` +
-    `?model=imagen-4&width=1280&height=720&seed=${seed}&safe=false`;
+  // نضع الـ prompt كاملاً — gen.pollinations.ai يقبل URLs طويلة
+  const encodedPrompt = encodeURIComponent(prompt);
+  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=1280&height=720&seed=${seed}&safe=false`;
+
+  logInfo(`[POLLINATIONS] model=${model} seed=${seed} url_len=${url.length}`);
+  logInfo(`[POLLINATIONS] prompt كامل: ${prompt}`);
 
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -243,17 +242,61 @@ async function tryPollinationsGptImage(prompt: string, ms: number): Promise<Arra
       },
     });
     clearTimeout(t);
-    if (res.status === 402) throw new Error("gptimage: رصيد حبوب اللقاح غير كافٍ");
-    if (res.status === 401) throw new Error("gptimage: مفتاح API غير صالح");
-    if (!res.ok)            throw new Error(`gptimage HTTP ${res.status}`);
+
+    if (res.status === 401) throw new Error(`${model}: مفتاح API غير صالح (401)`);
+    if (res.status === 402) throw new Error(`${model}: رصيد غير كافٍ (402)`);
+    if (res.status === 403) throw new Error(`${model}: رفض الوصول (403)`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`${model}: HTTP ${res.status} — ${body.slice(0, 100)}`);
+    }
+
+    const ctype = res.headers.get("content-type") ?? "";
+    if (!ctype.includes("image") && !ctype.includes("octet")) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`${model}: استجابة غير صورة (${ctype}): ${body.slice(0, 80)}`);
+    }
+
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 5000) throw new Error(`gptimage صورة صغيرة: ${buf.byteLength}B`);
+    if (buf.byteLength < 5000) throw new Error(`${model}: صورة صغيرة جداً ${buf.byteLength}B`);
+
+    logInfo(`[POLLINATIONS] ✅ ${model} — ${(buf.byteLength/1024).toFixed(1)}KB`);
     return buf;
   } catch (e) {
     clearTimeout(t);
     const m = e instanceof Error ? e.message : String(e);
-    throw new Error(m.includes("abort") ? `gptimage انتهت المهلة (${ms/1000}s)` : m);
+    throw new Error(m.includes("abort") ? `${model}: انتهت المهلة (${ms/1000}s)` : m);
   }
+}
+
+export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer> {
+  logInfo("[IMAGE-GEN] ===== بدء توليد الصورة =====");
+  logInfo(`[IMAGE-GEN] الـ prompt الكامل: ${prompt}`);
+  logInfo(`[IMAGE-GEN] طول الـ prompt: ${prompt.length} حرف`);
+
+  const errors: string[] = [];
+
+  // gptimage أولاً (أدق) ثم flux (أسرع)
+  for (const model of ["gptimage", "flux"]) {
+    for (const ms of [60000, 90000]) {
+      try {
+        const buf = await tryPollinationsModel(prompt, model, ms);
+        logInfo(`[IMAGE-GEN] ✅ نجح مع ${model}`);
+        return buf;
+      } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
+        logWarning(`[IMAGE-GEN] ❌ ${model} (${ms/1000}s): ${m}`);
+        errors.push(m);
+        // إذا مشكلة في المفتاح أو الصلاحيات → لا تُعيد المحاولة
+        if (m.includes("401") || m.includes("402") || m.includes("403")) break;
+        if (ms === 60000) await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  }
+
+  throw new Error("[IMAGE-GEN] فشل Pollinations:
+" + errors.join("
+"));
 }
 
 // ===== MERGE INTERFACES =====
