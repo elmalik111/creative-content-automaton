@@ -3,7 +3,7 @@ import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { generateVoiceoverScript, generateImagePrompts } from "../_shared/gemini.ts";
 import { generateSpeech } from "../_shared/elevenlabs.ts";
 import { generateImageWithFlux, startMergeWithFFmpeg } from "../_shared/huggingface.ts";
-// redeploy trigger
+
 // =================================================================
 // الحل الجذري لمشكلة الـ freeze:
 // نستخدم EdgeRuntime.waitUntil لإبقاء الـ worker حياً
