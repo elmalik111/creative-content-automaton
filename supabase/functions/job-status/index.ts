@@ -117,12 +117,49 @@ serve(async (req) => {
     }
 
     // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
+    const mergeStep = (steps || []).find((s: any) => s.step_name === "merge" && s.status === "processing");
     const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
     const providerJobId: string | undefined =
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
+
+    // إذا merge step جاهز (pending + ready_for_merge) → ابدأ الدمج
+    const mergeReady = mergeStep?.status === "pending" && (mergeStep?.output_data as any)?.ready_for_merge;
+    if (mergeReady && job.status === "processing") {
+      const mergeData = (mergeStep?.output_data || {}) as any;
+      logInfo("🔀 بدء الدمج تلقائياً...", { images: mergeData.image_urls?.length, audio: !!mergeData.audio_url });
+
+      const { startMergeWithFFmpeg } = await import("../_shared/huggingface.ts");
+      const merge = await startMergeWithFFmpeg({
+        images: mergeData.image_urls,
+        audio: mergeData.audio_url,
+        output_format: "mp4",
+      });
+
+      if (merge.status === "failed") {
+        await supabase.from("jobs").update({ status: "failed", error_message: merge.error || "فشل الدمج" }).eq("id", jobId);
+        return new Response(JSON.stringify({ status: "failed" }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      if (merge.output_url) {
+        // اكتمل فوراً
+        await supabase.from("job_steps").update({ status: "completed", output_data: { output_url: merge.output_url } }).eq("id", mergeStep!.id);
+        await supabase.from("jobs").update({ status: "completed", progress: 100, output_url: merge.output_url }).eq("id", jobId);
+        logInfo("✅ اكتمل الدمج فوراً:", merge.output_url);
+        return new Response(JSON.stringify({ status: "completed", output_url: merge.output_url }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      if (merge.job_id) {
+        await supabase.from("job_steps").update({
+          status: "processing",
+          output_data: { ...mergeData, provider_job_id: merge.job_id, ready_for_merge: false },
+        }).eq("id", mergeStep!.id);
+        await updateProgress(jobId, 78);
+        logInfo("✅ merge queued:", merge.job_id);
+        return new Response(JSON.stringify({ status: "processing", merge_job_id: merge.job_id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+    }
 
     if (job.status === "processing" && providerJobId && !job.output_url) {
       logInfo(`مراقبة عملية الدمج للمهمة ${jobId} (معرف المزود: ${providerJobId})`);
@@ -260,72 +297,6 @@ serve(async (req) => {
             })
             .eq("id", jobId);
 
-          // ── توليد metadata ونشر الفيديو تلقائياً ──────────────
-          let publishResults: Record<string, unknown> = {};
-          let videoTitle = "فيديو جديد";
-          let videoDescription = "";
-          let videoHashtags: string[] = [];
-
-          try {
-            // جلب السكريبت من job_steps
-            const { data: scriptStep } = await supabase
-              .from("job_steps")
-              .select("output_data")
-              .eq("job_id", jobId)
-              .eq("step_name", "script_generation")
-              .maybeSingle();
-
-            const script = (scriptStep?.output_data as any)?.script || "";
-
-            if (script) {
-              // توليد metadata من Gemini
-              const { generateVideoMetadata } = await import("../_shared/gemini.ts");
-              const metadata = await generateVideoMetadata(script);
-              videoTitle       = metadata.title;
-              videoDescription = metadata.description + "\n\n" + metadata.hashtags.join(" ");
-              videoHashtags    = metadata.hashtags;
-              logInfo("✅ metadata:", { title: videoTitle, hashtags: videoHashtags });
-            }
-
-            // جلب منصات النشر من job.input_data
-            const jobData = job as any;
-            const platforms: string[] = jobData?.input_data?.platforms || [];
-
-            if (platforms.length > 0) {
-              logInfo(`نشر الفيديو على: ${platforms.join(", ")}`);
-
-              const publishResp = await fetch(
-                `${Deno.env.get("SUPABASE_URL")}/functions/v1/publish-video`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
-                  },
-                  body: JSON.stringify({
-                    job_id: jobId,
-                    video_url: finalUrl,
-                    title: videoTitle,
-                    description: videoDescription,
-                    platforms,
-                  }),
-                }
-              );
-
-              if (publishResp.ok) {
-                const publishData = await publishResp.json();
-                publishResults = publishData.results || {};
-                logInfo("✅ نتيجة النشر:", publishResults);
-              } else {
-                logWarning("⚠️ فشل النشر:", await publishResp.text());
-              }
-            } else {
-              logInfo("لا توجد منصات نشر محددة — تخطي النشر");
-            }
-          } catch (pubErr) {
-            logWarning("⚠️ خطأ في النشر:", pubErr instanceof Error ? pubErr.message : String(pubErr));
-          }
-
           if (publishStep?.id && publishStep.status !== "completed") {
             await supabase
               .from("job_steps")
@@ -333,13 +304,7 @@ serve(async (req) => {
                 status: "completed",
                 started_at: publishStep.started_at || new Date().toISOString(),
                 completed_at: new Date().toISOString(),
-                output_data: {
-                  video_url: finalUrl,
-                  title: videoTitle,
-                  description: videoDescription,
-                  hashtags: videoHashtags,
-                  publish_results: publishResults,
-                },
+                output_data: { video_url: finalUrl, publish_results: {} },
               })
               .eq("id", publishStep.id);
           }
