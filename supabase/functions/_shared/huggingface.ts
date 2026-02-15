@@ -294,9 +294,7 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
     }
   }
 
-  throw new Error("[IMAGE-GEN] فشل Pollinations:
-" + errors.join("
-"));
+  throw new Error("[IMAGE-GEN] فشل Pollinations: " + errors.join(", "));
 }
 
 // ===== MERGE INTERFACES =====
