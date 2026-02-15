@@ -297,16 +297,84 @@ serve(async (req) => {
             })
             .eq("id", jobId);
 
+          // ── النشر التلقائي ──────────────────────────────────
+          let publishResults: Record<string, unknown> = {};
+          let videoTitle = "فيديو جديد";
+          let videoDescription = "";
+          let videoHashtags: string[] = [];
+
+          try {
+            // جلب السكريبت لتوليد metadata
+            const { data: scriptStepData } = await supabase
+              .from("job_steps").select("output_data")
+              .eq("job_id", jobId).eq("step_name", "script_generation").maybeSingle();
+            const script = (scriptStepData?.output_data as any)?.script || "";
+
+            if (script) {
+              const { generateVideoMetadata } = await import("../_shared/gemini.ts");
+              const meta = await generateVideoMetadata(script);
+              videoTitle       = meta.title;
+              videoDescription = meta.description + "
+
+" + meta.hashtags.join(" ");
+              videoHashtags    = meta.hashtags;
+              logInfo("✅ metadata جاهز:", { title: videoTitle });
+            }
+
+            // قراءة platforms من العمود المنفصل أو input_data
+            const jobAny = job as any;
+            const platforms: string[] =
+              (Array.isArray(jobAny.platforms) ? jobAny.platforms : null) ||
+              (Array.isArray(jobAny.input_data?.platforms) ? jobAny.input_data.platforms : null) ||
+              [];
+
+            if (platforms.length > 0) {
+              logInfo(`[PUBLISH] نشر على: ${platforms.join(", ")}`);
+              const publishResp = await fetch(
+                `${Deno.env.get("SUPABASE_URL")}/functions/v1/publish-video`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  },
+                  body: JSON.stringify({
+                    job_id: jobId,
+                    video_url: finalUrl,
+                    title: videoTitle,
+                    description: videoDescription,
+                    hashtags: videoHashtags,
+                    platforms,
+                  }),
+                }
+              );
+              if (publishResp.ok) {
+                const pd = await publishResp.json();
+                publishResults = pd.results || {};
+                logInfo("✅ نتيجة النشر:", publishResults);
+              } else {
+                logInfo("⚠️ فشل النشر:", await publishResp.text());
+              }
+            } else {
+              logInfo("[PUBLISH] لا توجد منصات — تخطي النشر");
+            }
+          } catch (pubErr) {
+            logInfo("⚠️ خطأ في النشر:", pubErr instanceof Error ? pubErr.message : String(pubErr));
+          }
+
           if (publishStep?.id && publishStep.status !== "completed") {
-            await supabase
-              .from("job_steps")
-              .update({
-                status: "completed",
-                started_at: publishStep.started_at || new Date().toISOString(),
-                completed_at: new Date().toISOString(),
-                output_data: { video_url: finalUrl, publish_results: {} },
-              })
-              .eq("id", publishStep.id);
+            await supabase.from("job_steps").update({
+              status: "completed",
+              started_at: publishStep.started_at || new Date().toISOString(),
+              completed_at: new Date().toISOString(),
+              output_data: {
+                video_url: finalUrl,
+                title: videoTitle,
+                description: videoDescription,
+                hashtags: videoHashtags,
+                publish_results: publishResults,
+              },
+            }).eq("id", publishStep.id);
           }
 
           logInfo(`✓✓✓ المهمة ${jobId} اكتملت بنجاح! ✓✓✓`);
