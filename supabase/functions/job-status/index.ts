@@ -3,8 +3,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.93.1";
 import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
-const MAX_CONSECUTIVE_FAILURES = 5;
-const MAX_JOB_AGE_MS = 25 * 60 * 1000;
+const MAX_CONSECUTIVE_FAILURES = 20;
 
 // ===== LOGGING =====
 function logInfo(message: string, data?: any) {
@@ -67,35 +66,20 @@ serve(async (req) => {
 
     let jobId: string | null = null;
 
-    // 1. من URL path مثل /job-status/abc123
-    if (maybeFromPath && maybeFromPath !== "job-status" && maybeFromPath.length > 5) {
+    if (maybeFromPath && maybeFromPath !== "job-status") {
       jobId = maybeFromPath;
-    }
-    // 2. من query string: ?job_id=xxx أو ?jobId=xxx
-    if (!jobId) {
-      jobId = url.searchParams.get("job_id")
-           || url.searchParams.get("jobId")
-           || url.searchParams.get("id")
-           || null;
-    }
-    // 3. من request body
-    if (!jobId) {
-      try {
-        const rawText = await req.text();
-        if (rawText && rawText.trim().startsWith("{")) {
-          const body = JSON.parse(rawText);
-          jobId = body?.job_id || body?.jobId || body?.id || null;
-        }
-      } catch { /* body فارغ */ }
+    } else {
+      const fromQuery = url.searchParams.get("job_id") || url.searchParams.get("jobId");
+      if (fromQuery) jobId = fromQuery;
+      else {
+        const body = await req.json().catch(() => ({} as any));
+        jobId = body?.job_id || body?.jobId || null;
+      }
     }
 
     if (!jobId) {
-      logError("[400] job_id مفقود", { method: req.method, path: url.pathname, query: url.search });
       return new Response(
-        JSON.stringify({
-          error: "job_id is required",
-          hint: "أرسل job_id في: URL path, query ?job_id=xxx, أو body {job_id:'xxx'}"
-        }),
+        JSON.stringify({ error: "job_id is required" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -133,31 +117,15 @@ serve(async (req) => {
     }
 
     // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    const mergeStep = (steps || []).find((s: any) =>
-      ["merge", "media_merge"].includes(s.step_name) && s.status === "processing"
-    );
-    const publishStep = (steps || []).find((s: any) =>
-      ["publishing", "finalize"].includes(s.step_name)
-    );
+    const mergeStep = (steps || []).find((s: any) => s.step_name === "media_merge" && s.status === "processing");
+    const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
     const providerJobId: string | undefined =
-      mergeOutput?.provider_job_id || mergeOutput?.providerJobId ||
-      mergeOutput?.job_id || mergeOutput?.jobId || mergeOutput?.hf_job_id ||
-      (job.input_data as any)?.provider_job_id;
-
-    if (job.status === "processing" && job.created_at) {
-      const ageMs = Date.now() - new Date(job.created_at).getTime();
-      if (ageMs > MAX_JOB_AGE_MS) {
-        const ageMin = Math.round(ageMs / 60000);
-        const timeoutMsg = `[TIMEOUT] المهمة تجاوزت ${ageMin} دقيقة — أُوقفت تلقائياً`;
-        await supabase.from("jobs").update({ status: "failed", error_message: timeoutMsg }).eq("id", jobId);
-        Object.assign(job, { status: "failed", error_message: timeoutMsg });
-      }
-    }
+      mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
 
     if (job.status === "processing" && providerJobId && !job.output_url) {
-      logInfo(`[POLL] مراقبة HF Space [${providerJobId}]`);
+      logInfo(`مراقبة عملية الدمج للمهمة ${jobId} (معرف المزود: ${providerJobId})`);
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
@@ -292,6 +260,72 @@ serve(async (req) => {
             })
             .eq("id", jobId);
 
+          // ── توليد metadata ونشر الفيديو تلقائياً ──────────────
+          let publishResults: Record<string, unknown> = {};
+          let videoTitle = "فيديو جديد";
+          let videoDescription = "";
+          let videoHashtags: string[] = [];
+
+          try {
+            // جلب السكريبت من job_steps
+            const { data: scriptStep } = await supabase
+              .from("job_steps")
+              .select("output_data")
+              .eq("job_id", jobId)
+              .eq("step_name", "script_generation")
+              .maybeSingle();
+
+            const script = (scriptStep?.output_data as any)?.script || "";
+
+            if (script) {
+              // توليد metadata من Gemini
+              const { generateVideoMetadata } = await import("../_shared/gemini.ts");
+              const metadata = await generateVideoMetadata(script);
+              videoTitle       = metadata.title;
+              videoDescription = metadata.description + "\n\n" + metadata.hashtags.join(" ");
+              videoHashtags    = metadata.hashtags;
+              logInfo("✅ metadata:", { title: videoTitle, hashtags: videoHashtags });
+            }
+
+            // جلب منصات النشر من job.input_data
+            const jobData = job as any;
+            const platforms: string[] = jobData?.input_data?.platforms || [];
+
+            if (platforms.length > 0) {
+              logInfo(`نشر الفيديو على: ${platforms.join(", ")}`);
+
+              const publishResp = await fetch(
+                `${Deno.env.get("SUPABASE_URL")}/functions/v1/publish-video`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")}`,
+                  },
+                  body: JSON.stringify({
+                    job_id: jobId,
+                    video_url: finalUrl,
+                    title: videoTitle,
+                    description: videoDescription,
+                    platforms,
+                  }),
+                }
+              );
+
+              if (publishResp.ok) {
+                const publishData = await publishResp.json();
+                publishResults = publishData.results || {};
+                logInfo("✅ نتيجة النشر:", publishResults);
+              } else {
+                logWarning("⚠️ فشل النشر:", await publishResp.text());
+              }
+            } else {
+              logInfo("لا توجد منصات نشر محددة — تخطي النشر");
+            }
+          } catch (pubErr) {
+            logWarning("⚠️ خطأ في النشر:", pubErr instanceof Error ? pubErr.message : String(pubErr));
+          }
+
           if (publishStep?.id && publishStep.status !== "completed") {
             await supabase
               .from("job_steps")
@@ -299,7 +333,13 @@ serve(async (req) => {
                 status: "completed",
                 started_at: publishStep.started_at || new Date().toISOString(),
                 completed_at: new Date().toISOString(),
-                output_data: { video_url: finalUrl, publish_results: {} },
+                output_data: {
+                  video_url: finalUrl,
+                  title: videoTitle,
+                  description: videoDescription,
+                  hashtags: videoHashtags,
+                  publish_results: publishResults,
+                },
               })
               .eq("id", publishStep.id);
           }
@@ -307,10 +347,8 @@ serve(async (req) => {
           logInfo(`✓✓✓ المهمة ${jobId} اكتملت بنجاح! ✓✓✓`);
         }
       } catch (e) {
-        const errorMsg = e instanceof Error
-          ? e.message
-          : (typeof e === "string" ? e : (JSON.stringify(e) || "خطأ غير معروف"));
-        logError(`[POLL-ERROR] ${errorMsg}`);
+        const errorMsg = e instanceof Error ? e.message : String(e);
+        logError(`خطأ في مراقبة الدمج [${jobId}]`, e);
 
         // Increment failure counter
         const newFailures = currentFailures + 1;
@@ -347,12 +385,11 @@ serve(async (req) => {
 
         // If too many consecutive failures, fail the job with detailed error
         if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg =
-            `[MERGE-FAIL] فشل الدمج بعد ${MAX_CONSECUTIVE_FAILURES} محاولات\n` +
-            `السبب: ${errorMsg}\n` +
-            (serverHealthInfo ? `السيرفر: ${serverHealthInfo}\n` : "") +
-            `HF Job ID: ${providerJobId}\n` +
-            `الحل: أعد تشغيل المهمة.`;
+          const failMsg = 
+            `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
+            `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
+            `معرف مهمة المزود: ${providerJobId}\n` +
+            `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
 
