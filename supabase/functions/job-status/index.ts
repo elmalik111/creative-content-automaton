@@ -117,7 +117,7 @@ serve(async (req) => {
     }
 
     // --- MERGE TICK WITH ENHANCED ERROR HANDLING ---
-    const mergeStep = (steps || []).find((s: any) => s.step_name === "merge" && s.status === "processing");
+    const mergeStep = (steps || []).find((s: any) => s.step_name === "merge" && (s.status === "processing" || s.status === "pending"));
     const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
