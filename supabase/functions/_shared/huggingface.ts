@@ -277,8 +277,8 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
   const errors: string[] = [];
 
   // gptimage أولاً (أدق) ثم flux (أسرع)
-  for (const model of ["gptimage", "flux"]) {
-    for (const ms of [60000, 90000]) {
+  for (const model of ["flux", "gptimage"]) {
+    for (const ms of [30000, 45000]) {
       try {
         const buf = await tryPollinationsModel(prompt, model, ms);
         logInfo(`[IMAGE-GEN] ✅ نجح مع ${model}`);
