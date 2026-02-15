@@ -188,3 +188,50 @@ export async function generateImagePrompts(
 
   return prompts;
 }
+
+// =================================================================
+// توليد metadata للنشر (عنوان + وصف + هاشتاجات)
+// =================================================================
+export async function generateVideoMetadata(script: string): Promise<{
+  title: string;
+  description: string;
+  hashtags: string[];
+  tags: string[];
+}> {
+  const prompt = 
+    "Based on this Arabic video script, generate social media metadata in JSON format only.\n" +
+    "Return ONLY valid JSON, no markdown, no explanation.\n\n" +
+    "Required format:\n" +
+    "{\n" +
+    '  "title": "engaging Arabic title under 100 chars",\n' +
+    '  "description": "Arabic description 2-3 sentences with keywords",\n' +
+    '  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],\n' +
+    '  "tags": ["tag1", "tag2", "tag3"]\n' +
+    "}\n\n" +
+    "Script:\n" + script.slice(0, 800);
+
+  try {
+    const raw = await generateWithGemini(prompt);
+    console.log("[GEMINI] metadata raw:", raw.slice(0, 200));
+    
+    // استخراج JSON
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON found");
+    
+    const data = JSON.parse(jsonMatch[0]);
+    return {
+      title: data.title || "فيديو جديد",
+      description: data.description || "",
+      hashtags: Array.isArray(data.hashtags) ? data.hashtags : [],
+      tags: Array.isArray(data.tags) ? data.tags : [],
+    };
+  } catch (e) {
+    console.error("[GEMINI] metadata error:", e instanceof Error ? e.message : e);
+    return {
+      title: "فيديو جديد",
+      description: script.slice(0, 150),
+      hashtags: ["#فيديو", "#محتوى"],
+      tags: ["video", "content"],
+    };
+  }
+}
