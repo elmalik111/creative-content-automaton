@@ -270,6 +270,7 @@ function parseCreateCommand(text: string): CreateCommand | null {
       case "عدد_المشاهد":
         data.scene_count = parseInt(value) || 5;
         break;
+      case "نوع_يوتيوب": (data as any).youtube_type = value === "long" ? "long" : "shorts"; break;
       case "الطول":
         data.duration = parseInt(value) || 60;
         break;
@@ -302,6 +303,7 @@ function parseCreateCommand(text: string): CreateCommand | null {
     voice_type: data.voice_type || "male_arabic",
     scene_count: data.scene_count || 5,
     duration: data.duration || 60,
+    youtube_type: (data as any).youtube_type || "shorts",
   };
 }
 
