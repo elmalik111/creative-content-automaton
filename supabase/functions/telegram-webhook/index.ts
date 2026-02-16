@@ -271,6 +271,7 @@ function parseCreateCommand(text: string): CreateCommand | null {
         data.scene_count = parseInt(value) || 5;
         break;
       case "نوع_يوتيوب": (data as any).youtube_type = value === "long" ? "long" : "shorts"; break;
+      case "نوع_يوتيوب": (data as any).youtube_type = value === "long" ? "long" : "shorts"; break;
       case "الطول":
         data.duration = parseInt(value) || 60;
         break;
