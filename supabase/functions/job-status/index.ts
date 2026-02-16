@@ -340,6 +340,7 @@ serve(async (req) => {
                   body: JSON.stringify({
                     job_id: jobId,
                     video_url: finalUrl,
+                    duration: (job as any).input_data?.duration || 0,
                     title: videoTitle,
                     description: videoDescription,
                     hashtags: videoHashtags,

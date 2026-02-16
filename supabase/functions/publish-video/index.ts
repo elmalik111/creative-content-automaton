@@ -93,13 +93,19 @@ async function getToken(platform: string): Promise<string | null> {
 }
 
 async function getInstagramUserId(accessToken: string): Promise<string | null> {
-  const r = await fetch("https://graph.facebook.com/v18.0/me?fields=id,instagram_business_account&access_token=" + accessToken);
+  // أولاً: جلب من account_name في DB
+  const { data } = await supabase
+    .from("oauth_tokens").select("account_name")
+    .eq("platform", "instagram").eq("is_active", true)
+    .order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (data?.account_name) {
+    console.log("[PUBLISH] Instagram ig_user_id from DB: " + data.account_name);
+    return data.account_name;
+  }
+  // fallback: جلب من API
+  const r = await fetch("https://graph.facebook.com/v18.0/me?fields=id,name&access_token=" + accessToken);
   const d = await r.json();
-  if (d.instagram_business_account?.id) return d.instagram_business_account.id;
-  const r2 = await fetch("https://graph.facebook.com/v18.0/me?access_token=" + accessToken);
-  const d2 = await r2.json();
-  console.log("[PUBLISH] Instagram /me: " + JSON.stringify(d2).slice(0, 200));
-  if (d2.id) return d2.id;
+  console.log("[PUBLISH] Instagram /me: " + JSON.stringify(d).slice(0, 200));
   return null;
 }
 
