@@ -361,6 +361,16 @@ serve(async (req) => {
             logInfo("⚠️ خطأ في النشر:", pubErr instanceof Error ? pubErr.message : String(pubErr));
           }
 
+          await supabase
+            .from("jobs")
+            .update({ 
+              status: "completed", 
+              progress: 100, 
+              output_url: finalUrl, 
+              error_message: null 
+            })
+            .eq("id", jobId);
+
           if (publishStep?.id && publishStep.status !== "completed") {
             await supabase.from("job_steps").update({
               status: "completed",
