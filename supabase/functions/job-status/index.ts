@@ -314,10 +314,9 @@ serve(async (req) => {
               const { generateVideoMetadata } = await import("../_shared/gemini.ts");
               const meta = await generateVideoMetadata(script);
               videoTitle       = meta.title;
-              videoDescription = meta.description + "
+              videoDescription = meta.description + " "\n" + meta.hashtags.join(" ");
 
-" + meta.hashtags.join(" ");
-              videoHashtags    = meta.hashtags;
+
               logInfo("✅ metadata جاهز:", { title: videoTitle });
             }
 
