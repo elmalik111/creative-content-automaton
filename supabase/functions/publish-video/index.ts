@@ -106,7 +106,10 @@ async function getInstagramUserId(accessToken: string): Promise<string | null> {
 async function publishToYouTube(req: PublishRequest): Promise<{ success: boolean; url?: string; error?: string }> {
   const accessToken = await getToken("youtube");
   if (!accessToken) return { success: false, error: "YouTube token missing" };
-  const isShorts = req.youtube_type === "shorts";
+  // كشف تلقائي: أقل من 60 ثانية = Shorts
+  const duration = (req as any).duration || 0;
+  const isShorts = duration > 0 ? duration <= 60 : req.youtube_type === "shorts";
+  console.log("[PUBLISH] YouTube duration=" + duration + " isShorts=" + isShorts);
   const title = isShorts && !req.title.includes("#Shorts") ? req.title + " #Shorts" : req.title;
   const initResp = await fetch(
     "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
