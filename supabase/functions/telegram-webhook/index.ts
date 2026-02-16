@@ -123,8 +123,7 @@ serve(async (req) => {
           status: "pending",
           progress: 0,
           source_url: `telegram:${chatId}`,
-          input_data: command,
-          platforms: ["youtube", "instagram", "facebook"],
+          input_data: { ...command, platforms: ["youtube", "instagram", "facebook"] },
         })
         .select()
         .single();
