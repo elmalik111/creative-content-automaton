@@ -9,6 +9,7 @@ interface PublishRequest {
   hashtags?: string[];
   tags?: string[];
   platforms: ("youtube" | "instagram" | "facebook")[];
+  youtube_type?: "shorts" | "long"; // اختياري
 }
 
 const YOUTUBE_CLIENT_ID     = Deno.env.get("YOUTUBE_CLIENT_ID");
@@ -59,10 +60,10 @@ serve(async (req) => {
     }
 
     // حفظ نتائج النشر في DB
-    await supabase.from("jobs")
-      .update({ publish_results: results })
-      .eq("id", body.job_id)
-      .catch(() => {});
+    await supabase.from("job_steps")
+      .update({ output_data: { publish_results: results } })
+      .eq("job_id", body.job_id)
+      .eq("step_name", "publishing");
 
     return new Response(JSON.stringify({ results }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -76,25 +77,23 @@ serve(async (req) => {
 });
 
 // =================================================================
-// TOKEN HELPER
+// TOKEN HELPER — يقرأ الـ token مباشرة بدون /me/accounts
 // =================================================================
-async function getValidAccessToken(platform: string): Promise<{
-  access_token: string;
-  page_access_token?: string;
-  page_id?: string;
-  ig_user_id?: string;
-} | null> {
-  const { data: tokenData } = await supabase
-    .from("oauth_tokens").select("*")
-    .eq("platform", platform).eq("is_active", true).maybeSingle();
+async function getToken(platform: string): Promise<string | null> {
+  const { data } = await supabase
+    .from("oauth_tokens")
+    .select("access_token, refresh_token, expires_at, id")
+    .eq("platform", platform)
+    .eq("is_active", true)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
-  if (!tokenData) return null;
+  if (!data) return null;
 
-  let accessToken = tokenData.access_token;
-
-  // تحديث token منتهي الصلاحية (YouTube فقط)
-  if (platform === "youtube" && tokenData.expires_at && new Date(tokenData.expires_at) < new Date()) {
-    if (!tokenData.refresh_token || !YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) return null;
+  // YouTube: تحديث token منتهي الصلاحية
+  if (platform === "youtube" && data.expires_at && new Date(data.expires_at) < new Date()) {
+    if (!data.refresh_token || !YOUTUBE_CLIENT_ID || !YOUTUBE_CLIENT_SECRET) return null;
 
     const refreshResp = await fetch("https://oauth2.googleapis.com/token", {
       method: "POST",
@@ -102,50 +101,64 @@ async function getValidAccessToken(platform: string): Promise<{
       body: new URLSearchParams({
         client_id: YOUTUBE_CLIENT_ID,
         client_secret: YOUTUBE_CLIENT_SECRET,
-        refresh_token: tokenData.refresh_token,
+        refresh_token: data.refresh_token,
         grant_type: "refresh_token",
       }),
     });
 
     const refreshData = await refreshResp.json();
-    if (refreshData.error) { console.error("[PUBLISH] token refresh failed:", refreshData.error); return null; }
+    if (refreshData.error) {
+      console.error("[PUBLISH] YouTube token refresh failed:", refreshData.error);
+      return null;
+    }
 
     const expiresAt = refreshData.expires_in
       ? new Date(Date.now() + refreshData.expires_in * 1000).toISOString() : null;
 
     await supabase.from("oauth_tokens")
       .update({ access_token: refreshData.access_token, expires_at: expiresAt })
-      .eq("id", tokenData.id);
+      .eq("id", data.id);
 
-    accessToken = refreshData.access_token;
+    return refreshData.access_token;
   }
 
-  // Facebook: جلب page access token
-  if (platform === "facebook") {
-    const r = await fetch(`https://graph.facebook.com/v18.0/me/accounts?fields=id,name,access_token&access_token=${accessToken}`);
-    const d = await r.json();
-    const page = d.data?.[0];
-    if (page) return { access_token: accessToken, page_access_token: page.access_token, page_id: page.id };
-  }
+  return data.access_token;
+}
 
-  // Instagram: جلب ig_user_id
-  if (platform === "instagram") {
-    const r = await fetch(`https://graph.facebook.com/v18.0/me/accounts?fields=id,instagram_business_account&access_token=${accessToken}`);
-    const d = await r.json();
-    const page = d.data?.find((p: any) => p.instagram_business_account);
-    if (page) return { access_token: accessToken, ig_user_id: page.instagram_business_account.id };
-  }
+// Instagram: جلب ig_user_id من الـ token مباشرة
+async function getInstagramUserId(accessToken: string): Promise<string | null> {
+  // جرب /me أولاً
+  const r = await fetch(`https://graph.facebook.com/v18.0/me?fields=id,instagram_business_account&access_token=${accessToken}`);
+  const d = await r.json();
 
-  return { access_token: accessToken };
+  if (d.instagram_business_account?.id) return d.instagram_business_account.id;
+
+  // جرب كـ Instagram Business token مباشرة
+  const r2 = await fetch(`https://graph.facebook.com/v18.0/me?access_token=${accessToken}`);
+  const d2 = await r2.json();
+  console.log("[PUBLISH] Instagram /me:", JSON.stringify(d2).slice(0, 200));
+
+  // إذا كان الـ id موجود مباشرة (Instagram token)
+  if (d2.id) return d2.id;
+
+  return null;
 }
 
 // =================================================================
 // YOUTUBE
-// الإصلاح: نستخدم video_url مباشرة بدون تحميل في RAM
 // =================================================================
 async function publishToYouTube(req: PublishRequest): Promise<{ success: boolean; url?: string; error?: string }> {
-  const tokenInfo = await getValidAccessToken("youtube");
-  if (!tokenInfo) return { success: false, error: "YouTube غير متصل أو انتهت صلاحية الـ token" };
+  const accessToken = await getToken("youtube");
+  if (!accessToken) return { success: false, error: "YouTube غير متصل أو انتهت صلاحية الـ token" };
+
+  const isShorts = req.youtube_type === "shorts";
+
+  // Shorts: يحتاج #Shorts في العنوان أو الوصف
+  const title = isShorts
+    ? (req.title.includes("#Shorts") ? req.title : req.title + " #Shorts")
+    : req.title;
+
+  const categoryId = "27"; // Education — مناسب للمحتوى التاريخي
 
   // الخطوة 1: إنشاء resumable upload session
   const initResp = await fetch(
@@ -153,16 +166,17 @@ async function publishToYouTube(req: PublishRequest): Promise<{ success: boolean
     {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${tokenInfo.access_token}`,
+        "Authorization": `Bearer ${accessToken}`,
         "Content-Type": "application/json",
         "X-Upload-Content-Type": "video/mp4",
       },
       body: JSON.stringify({
         snippet: {
-          title: req.title,
+          title,
           description: req.description,
           tags: req.tags?.length ? req.tags : ["محتوى", "فيديو", "عربي"],
           defaultLanguage: "ar",
+          categoryId,
         },
         status: { privacyStatus: "public" },
       }),
@@ -175,8 +189,7 @@ async function publishToYouTube(req: PublishRequest): Promise<{ success: boolean
     return { success: false, error: err.error?.message || "فشل بدء رفع YouTube" };
   }
 
-  // الخطوة 2: تحميل الفيديو من Supabase وإرساله مباشرة إلى YouTube
-  // نستخدم streaming بدل تحميل كامل في RAM
+  // الخطوة 2: رفع الفيديو بـ streaming
   const videoResp = await fetch(req.video_url);
   if (!videoResp.ok || !videoResp.body) {
     return { success: false, error: "فشل تحميل الفيديو من التخزين" };
@@ -197,25 +210,29 @@ async function publishToYouTube(req: PublishRequest): Promise<{ success: boolean
 
   const videoData = await uploadResp.json();
   if (videoData.id) {
-    return { success: true, url: `https://youtube.com/watch?v=${videoData.id}` };
+    const url = isShorts
+      ? `https://youtube.com/shorts/${videoData.id}`
+      : `https://youtube.com/watch?v=${videoData.id}`;
+    return { success: true, url };
   }
   return { success: false, error: videoData.error?.message || "لم يُرجع YouTube معرف الفيديو" };
 }
 
 // =================================================================
 // INSTAGRAM
-// الإصلاح: استخدام video_url مباشرة (بدون polling طويل)
-// الـ polling ينتقل إلى job-status لتجنب timeout
 // =================================================================
 async function publishToInstagram(req: PublishRequest): Promise<{ success: boolean; url?: string; error?: string }> {
-  const tokenInfo = await getValidAccessToken("instagram");
-  if (!tokenInfo?.ig_user_id) {
-    return { success: false, error: "Instagram غير متصل أو لا يوجد حساب Business" };
-  }
+  const accessToken = await getToken("instagram");
+  if (!accessToken) return { success: false, error: "Instagram غير متصل" };
+
+  const igUserId = await getInstagramUserId(accessToken);
+  if (!igUserId) return { success: false, error: "Instagram: لم يتم العثور على حساب Business" };
+
+  console.log(`[PUBLISH] Instagram ig_user_id: ${igUserId}`);
 
   // إنشاء media container
   const containerResp = await fetch(
-    `https://graph.facebook.com/v18.0/${tokenInfo.ig_user_id}/media`,
+    `https://graph.facebook.com/v18.0/${igUserId}/media`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -223,7 +240,7 @@ async function publishToInstagram(req: PublishRequest): Promise<{ success: boole
         media_type: "REELS",
         video_url: req.video_url,
         caption: `${req.title}\n\n${req.description}`,
-        access_token: tokenInfo.access_token,
+        access_token: accessToken,
       }),
     }
   );
@@ -235,12 +252,11 @@ async function publishToInstagram(req: PublishRequest): Promise<{ success: boole
   console.log(`[PUBLISH] Instagram container: ${containerData.id}`);
 
   // انتظار معالجة المحتوى (حد 60 ثانية)
-  const maxWait = 6;
-  for (let i = 0; i < maxWait; i++) {
+  for (let i = 0; i < 6; i++) {
     await new Promise(r => setTimeout(r, 10000));
 
     const statusResp = await fetch(
-      `https://graph.facebook.com/v18.0/${containerData.id}?fields=status_code&access_token=${tokenInfo.access_token}`
+      `https://graph.facebook.com/v18.0/${containerData.id}?fields=status_code&access_token=${accessToken}`
     );
     const statusData = await statusResp.json();
     console.log(`[PUBLISH] Instagram status[${i+1}]: ${statusData.status_code}`);
@@ -251,13 +267,13 @@ async function publishToInstagram(req: PublishRequest): Promise<{ success: boole
 
   // نشر الـ container
   const publishResp = await fetch(
-    `https://graph.facebook.com/v18.0/${tokenInfo.ig_user_id}/media_publish`,
+    `https://graph.facebook.com/v18.0/${igUserId}/media_publish`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         creation_id: containerData.id,
-        access_token: tokenInfo.access_token,
+        access_token: accessToken,
       }),
     }
   );
@@ -270,18 +286,27 @@ async function publishToInstagram(req: PublishRequest): Promise<{ success: boole
 }
 
 // =================================================================
-// FACEBOOK
-// الإصلاح: إضافة video_url كـ file_url مع fallback لـ source
+// FACEBOOK — يستخدم الـ Page token مباشرة
 // =================================================================
 async function publishToFacebook(req: PublishRequest): Promise<{ success: boolean; url?: string; error?: string }> {
-  const tokenInfo = await getValidAccessToken("facebook");
-  if (!tokenInfo?.page_id || !tokenInfo?.page_access_token) {
-    return { success: false, error: "Facebook غير متصل أو لا توجد صفحة" };
+  const accessToken = await getToken("facebook");
+  if (!accessToken) return { success: false, error: "Facebook غير متصل" };
+
+  // جلب Page ID من /me
+  const meResp = await fetch(`https://graph.facebook.com/v18.0/me?fields=id,name&access_token=${accessToken}`);
+  const meData = await meResp.json();
+
+  if (meData.error) {
+    console.error("[PUBLISH] Facebook /me error:", meData.error.message);
+    return { success: false, error: meData.error.message };
   }
 
-  // محاولة النشر بـ file_url أولاً
+  const pageId = meData.id;
+  console.log(`[PUBLISH] Facebook Page ID: ${pageId} (${meData.name})`);
+
+  // نشر الفيديو على الصفحة
   const resp = await fetch(
-    `https://graph.facebook.com/v18.0/${tokenInfo.page_id}/videos`,
+    `https://graph.facebook.com/v18.0/${pageId}/videos`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -289,7 +314,7 @@ async function publishToFacebook(req: PublishRequest): Promise<{ success: boolea
         file_url: req.video_url,
         title: req.title,
         description: req.description,
-        access_token: tokenInfo.page_access_token,
+        access_token: accessToken,
       }),
     }
   );
