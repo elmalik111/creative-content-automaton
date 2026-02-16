@@ -155,7 +155,7 @@ serve(async (req) => {
           status: "processing",
           output_data: { ...mergeData, provider_job_id: merge.job_id, ready_for_merge: false },
         }).eq("id", mergeStep!.id);
-        await updateProgress(jobId, 78);
+        await supabase.from("jobs").update({ progress: 78 }).eq("id", jobId);
         logInfo("✅ merge queued:", merge.job_id);
         return new Response(JSON.stringify({ status: "processing", merge_job_id: merge.job_id }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
