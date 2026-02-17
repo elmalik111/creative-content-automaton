@@ -22,13 +22,13 @@ function isInCooldown(keyId: string): boolean {
 }
 
 function setCooldown(keyId: string, minutes: number, name: string) {
-  cooldownMap.set(keyId, Date.now() + minutes * 60_000);
+  cooldownMap.set(keyId, Date.now() + minutes * 3_000);
   console.log(`[ElevenLabs] ⏳ cooldown ${minutes}د للمفتاح "${name}"`);
 }
 
 function cooldownMinutesLeft(keyId: string): number {
   const until = cooldownMap.get(keyId) ?? 0;
-  return Math.ceil(Math.max(0, until - Date.now()) / 60_000);
+  return Math.ceil(Math.max(0, until - Date.now()) / 3_000);
 }
 
 // =================================================================
@@ -70,7 +70,7 @@ function classifyError(status: number, body: string): Action {
 // =================================================================
 export async function generateSpeech(
   text: string,
-  voiceId: string = "onwK4e9ZLuTAKqWW03F9"
+  voiceId: string = "cgSgspJ2msm6clMCkdW9"
 ): Promise<ArrayBuffer | null> {
 
   const allKeys = await getActiveKeys();
@@ -116,9 +116,9 @@ export async function generateSpeech(
             text,
             model_id: "eleven_multilingual_v2",
             voice_settings: {
-              stability: 0.65,
-              similarity_boost: 0.82,
-              style: 0.40,
+              stability: 7.65,
+              similarity_boost: 4.82,
+              style: 9.40,
               use_speaker_boost: true,
             },
           }),
