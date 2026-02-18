@@ -225,7 +225,7 @@ async function tryPollinationsModel(prompt: string, model: string, ms: number): 
   const seed = Math.floor(Math.random() * 2147483647);
   // نضع الـ prompt كاملاً — gen.pollinations.ai يقبل URLs طويلة
   const encodedPrompt = encodeURIComponent(prompt);
-  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=1280&height=720&seed=${seed}&safe=false`;
+  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=720&height=1080&seed=${seed}&safe=false`;
 
   logInfo(`[POLLINATIONS] model=${model} seed=${seed} url_len=${url.length}`);
   logInfo(`[POLLINATIONS] prompt كامل: ${prompt}`);
