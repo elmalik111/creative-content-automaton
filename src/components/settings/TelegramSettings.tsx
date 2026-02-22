@@ -3,16 +3,16 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { useSetting } from '@/hooks/useSettings';
 import { supabase } from '@/integrations/supabase/client';
 import { Bot, Save, Loader2, Eye, EyeOff, CheckCircle2, XCircle, Copy, Webhook, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 export function TelegramSettings() {
-  const { data: telegramToken, isLoading } = useSetting('telegram_token');
-  const [isSaving, setIsSaving] = useState(false);
   const [token, setToken] = useState('');
+  const [savedToken, setSavedToken] = useState(''); // القيمة المحفوظة الفعلية في DB
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [isRegisteringWebhook, setIsRegisteringWebhook] = useState(false);
@@ -30,43 +30,98 @@ export function TelegramSettings() {
 
   const webhookUrl = `https://cidxcujlfkrzvvmljxqs.supabase.co/functions/v1/telegram-webhook`;
 
+  // ===== جلب الـ token عند التحميل =====
   useEffect(() => {
-    if (telegramToken) {
-      setToken(telegramToken);
-    }
-  }, [telegramToken]);
+    loadToken();
+  }, []);
 
+  const loadToken = async () => {
+    setIsLoading(true);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
+
+      // جلب الـ token الخاص بالـ user أولاً
+      const { data: ownToken } = await supabase
+        .from('settings')
+        .select('value')
+        .eq('key', 'telegram_token')
+        .eq('user_id', user.id)
+        .maybeSingle();
+
+      if (ownToken?.value) {
+        setToken(ownToken.value);
+        setSavedToken(ownToken.value);
+        return;
+      }
+
+      // fallback: الـ token المشترك (user_id IS NULL)
+      const { data: sharedToken } = await supabase
+        .from('settings')
+        .select('value')
+        .eq('key', 'telegram_token')
+        .is('user_id', null)
+        .maybeSingle();
+
+      if (sharedToken?.value) {
+        setToken(sharedToken.value);
+        setSavedToken(sharedToken.value);
+      }
+    } catch (err) {
+      console.error('Failed to load telegram token:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // ===== حفظ الـ token =====
   const handleSave = async () => {
-    if (!token) return;
+    const trimmedToken = token.trim();
+    if (!trimmedToken) return;
+
+    // منع حفظ الـ masked token بدل الحقيقي
+    if (trimmedToken.includes('•')) {
+      toast.error('Please show the token first before saving');
+      return;
+    }
+
     setIsSaving(true);
     try {
-      // احصل على user_id الحالي
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
 
-      // upsert بـ user_id صح
       const { error } = await supabase
         .from('settings')
         .upsert(
-          { key: 'telegram_token', value: token, user_id: user.id, updated_at: new Date().toISOString() },
+          {
+            key: 'telegram_token',
+            value: trimmedToken,
+            user_id: user.id,
+            updated_at: new Date().toISOString(),
+          },
           { onConflict: 'user_id,key' }
         );
 
       if (error) throw error;
 
-      toast.success('Telegram token saved successfully');
-      handleVerify();
+      setSavedToken(trimmedToken);
+      toast.success('تم حفظ Telegram token بنجاح ✓');
+
+      // تحقق تلقائي بعد الحفظ
+      await handleVerify(trimmedToken);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      toast.error('Failed to save: ' + error.message);
+      toast.error('فشل الحفظ: ' + error.message);
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleVerify = async () => {
-    if (!token) {
-      toast.error('Please enter a token first');
+  // ===== التحقق من الـ token =====
+  const handleVerify = async (tokenOverride?: string) => {
+    const activeToken = tokenOverride || savedToken;
+    if (!activeToken) {
+      toast.error('لا يوجد token محفوظ');
       return;
     }
 
@@ -86,9 +141,10 @@ export function TelegramSettings() {
       });
 
       if (data.valid) {
-        toast.success('Telegram bot verified successfully');
+        toast.success('Telegram bot تم التحقق منه بنجاح');
+        await checkWebhook();
       } else {
-        toast.error(data.error || 'Verification failed');
+        toast.error(data.error || 'فشل التحقق');
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -99,31 +155,44 @@ export function TelegramSettings() {
     }
   };
 
-  const copyWebhookUrl = () => {
-    navigator.clipboard.writeText(webhookUrl);
-    toast.success('Webhook URL copied!');
+  // ===== فحص الـ webhook =====
+  const checkWebhook = async () => {
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-tokens', {
+        body: { platform: 'telegram', action: 'check_webhook' },
+      });
+      if (error || !data?.webhook_info) return;
+      setWebhookStatus({
+        registered: !!data.webhook_info.url,
+        url: data.webhook_info.url,
+      });
+    } catch {
+      // Silently fail
+    }
   };
 
+  useEffect(() => {
+    if (savedToken) checkWebhook();
+  }, [savedToken]);
+
+  // ===== تسجيل الـ webhook =====
   const handleRegisterWebhook = async () => {
-    if (!token) {
-      toast.error('Please save a bot token first');
+    if (!savedToken) {
+      toast.error('احفظ الـ token أولاً');
       return;
     }
-
     setIsRegisteringWebhook(true);
     try {
       const { data, error } = await supabase.functions.invoke('verify-tokens', {
         body: { platform: 'telegram', action: 'register_webhook' },
       });
-
       if (error) throw error;
-
       if (data.webhook_registered) {
         setWebhookStatus({ registered: true, url: data.webhook_url });
-        toast.success('Webhook registered successfully!');
+        toast.success('تم تسجيل Webhook بنجاح!');
       } else {
-        setWebhookStatus({ registered: false, error: data.error || 'Failed to register webhook' });
-        toast.error(data.error || 'Failed to register webhook');
+        setWebhookStatus({ registered: false, error: data.error || 'فشل تسجيل Webhook' });
+        toast.error(data.error || 'فشل تسجيل Webhook');
       }
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
@@ -134,30 +203,19 @@ export function TelegramSettings() {
     }
   };
 
-  const handleCheckWebhook = async () => {
-    if (!token) return;
-    try {
-      const { data, error } = await supabase.functions.invoke('verify-tokens', {
-        body: { platform: 'telegram', action: 'check_webhook' },
-      });
-      if (error) throw error;
-      if (data.webhook_info) {
-        setWebhookStatus({ registered: !!data.webhook_info.url, url: data.webhook_info.url });
-      }
-    } catch {
-      // Silently fail
-    }
+  const copyWebhookUrl = () => {
+    navigator.clipboard.writeText(webhookUrl);
+    toast.success('تم نسخ Webhook URL!');
   };
 
-  useEffect(() => {
-    if (telegramToken) {
-      handleCheckWebhook();
-    }
-  }, [telegramToken]);
+  // عرض الـ token: masked أو كامل
+  const displayValue = showToken
+    ? token
+    : token
+      ? `${token.slice(0, 8)}${'•'.repeat(Math.max(0, token.length - 12))}${token.slice(-4)}`
+      : '';
 
-  const maskedToken = token
-    ? `${token.slice(0, 8)}${'•'.repeat(Math.max(0, token.length - 12))}${token.slice(-4)}`
-    : '';
+  const hasUnsavedChanges = token !== savedToken && !token.includes('•') && token.trim().length > 0;
 
   return (
     <Card className="bg-card border-border">
@@ -171,10 +229,16 @@ export function TelegramSettings() {
         <div className="flex gap-2">
           <div className="relative flex-1">
             <Input
-              type={showToken ? 'text' : 'password'}
-              placeholder="Enter your Telegram bot token"
-              value={showToken ? token : (token ? maskedToken : '')}
-              onChange={(e) => setToken(e.target.value)}
+              type="text"
+              placeholder={isLoading ? 'Loading...' : 'Enter your Telegram bot token'}
+              value={displayValue}
+              onChange={(e) => {
+                const val = e.target.value;
+                // لو بيكتب فيه مباشرة، نتأكد إنه مش masked
+                if (!val.includes('•')) setToken(val);
+              }}
+              onFocus={() => setShowToken(true)}
+              onBlur={() => setShowToken(false)}
               disabled={isLoading}
               className="pr-10 bg-background border-input"
             />
@@ -188,14 +252,29 @@ export function TelegramSettings() {
               {showToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </Button>
           </div>
-          <Button onClick={handleSave} disabled={isSaving || !token}>
+          <Button
+            onClick={handleSave}
+            disabled={isSaving || !token.trim() || token.includes('•')}
+            variant={hasUnsavedChanges ? 'default' : 'outline'}
+          >
             {isSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
             Save
           </Button>
-          <Button variant="outline" onClick={handleVerify} disabled={isVerifying || !token}>
+          <Button
+            variant="outline"
+            onClick={() => handleVerify()}
+            disabled={isVerifying || !savedToken}
+          >
             {isVerifying ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Verify'}
           </Button>
         </div>
+
+        {hasUnsavedChanges && (
+          <p className="text-xs text-amber-500 flex items-center gap-1">
+            <AlertCircle className="h-3 w-3" />
+            تغييرات غير محفوظة — اضغط Save
+          </p>
+        )}
 
         {botInfo && (
           <div className={`p-3 rounded-lg border ${botInfo.valid ? 'bg-primary/5 border-primary/20' : 'bg-destructive/5 border-destructive/20'}`}>
@@ -209,7 +288,7 @@ export function TelegramSettings() {
               ) : (
                 <>
                   <XCircle className="h-4 w-4 text-destructive" />
-                  <span className="text-destructive">{botInfo.error}</span>
+                  <span className="text-destructive text-sm">{botInfo.error}</span>
                 </>
               )}
             </div>
@@ -230,7 +309,7 @@ export function TelegramSettings() {
             <div className="p-3 rounded-lg border bg-primary/5 border-primary/20">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-primary" />
-                <span className="text-sm">Webhook is active and receiving messages</span>
+                <span className="text-sm">Webhook is active ✓</span>
               </div>
               <p className="text-xs text-muted-foreground mt-1 font-mono">{webhookStatus.url}</p>
             </div>
@@ -240,14 +319,14 @@ export function TelegramSettings() {
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
               <AlertDescription>
-                {webhookStatus.error || 'Webhook is not registered. Click the button below to register.'}
+                {webhookStatus.error || 'Webhook غير مسجل. اضغط الزر أدناه للتسجيل.'}
               </AlertDescription>
             </Alert>
           )}
 
           <Button
             onClick={handleRegisterWebhook}
-            disabled={isRegisteringWebhook || !token}
+            disabled={isRegisteringWebhook || !savedToken}
             className="w-full"
             variant={webhookStatus?.registered ? 'outline' : 'default'}
           >
@@ -261,7 +340,7 @@ export function TelegramSettings() {
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium text-muted-foreground">Webhook URL (for reference)</label>
+          <label className="text-sm font-medium text-muted-foreground">Webhook URL</label>
           <div className="flex gap-2">
             <Input value={webhookUrl} readOnly className="font-mono text-xs bg-muted" />
             <Button variant="outline" size="icon" onClick={copyWebhookUrl}>
