@@ -192,7 +192,7 @@ async function tryPollinationsModel(
 ): Promise<ArrayBuffer> {
   const seed = Math.floor(Math.random() * 2147483647);
   const encodedPrompt = encodeURIComponent(prompt);
-  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=720&height=1080&seed=${seed}&safe=false`;
+  const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=${model}&width=1080&height=1920&seed=${seed}&safe=false&nologo=true`;
 
   logInfo(`[POLLINATIONS] model=${model} seed=${seed}`);
 
@@ -249,9 +249,8 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
   
   // Try multiple models with different timeouts
   const models = [
-    { name: "flux-anime", timeout: 45000 },  // 45s
-    { name: "flux", timeout: 45000 },        // 45s
-    { name: "flux-realism", timeout: 45000 } // 45s
+    { name: "flux",         timeout: 60000 },  // 60s primary
+    { name: "flux-realism", timeout: 60000 },  // 60s fallback
   ];
 
   const errors: string[] = [];
