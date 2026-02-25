@@ -192,7 +192,7 @@ async function tryPollinationsModel(
 ): Promise<ArrayBuffer> {
   const seed = Math.floor(Math.random() * 2147483647);
   const encodedPrompt = encodeURIComponent(prompt);
-  const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=${model}&width=1080&height=1920&seed=${seed}&safe=false&nologo=true`;
+  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=1080&height=1920&seed=${seed}&safe=false&nologo=true`;
 
   logInfo(`[POLLINATIONS] model=${model} seed=${seed}`);
 
