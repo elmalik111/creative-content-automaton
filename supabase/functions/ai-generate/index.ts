@@ -75,33 +75,23 @@ async function generateSingleImageWithRetry(
     try {
       log('INFO', `🖼️ صورة ${index + 1}: محاولة ${attempt}/${maxRetries}`);
       
-      const timeoutMs = 60000;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      // generateImageWithFlux handles its own internal timeout per model
+      const buf = await generateImageWithFlux(prompt);
       
-      try {
-        const buf = await generateImageWithFlux(prompt);
-        clearTimeout(timeoutId);
-        
-        if (!buf || buf.byteLength < 1000) {
-          throw new Error('صورة فارغة');
-        }
-        
-        const imgFile = `${jobId}/image_${index}.jpg`;
-        const { error: imgErr } = await supabase.storage.from("temp-files")
-          .upload(imgFile, buf, { contentType: "image/jpeg", upsert: true });
-        
-        if (imgErr) throw new Error(`رفع فشل: ${imgErr.message}`);
-        
-        const { data: imgUrl } = supabase.storage.from("temp-files").getPublicUrl(imgFile);
-        log('INFO', `✅ صورة ${index + 1} نجحت`);
-        
-        return { buffer: buf, url: imgUrl.publicUrl };
-        
-      } catch (timeoutError) {
-        clearTimeout(timeoutId);
-        throw timeoutError;
+      if (!buf || buf.byteLength < 1000) {
+        throw new Error('صورة فارغة أو صغيرة جداً');
       }
+      
+      const imgFile = `${jobId}/image_${index}.jpg`;
+      const { error: imgErr } = await supabase.storage.from("temp-files")
+        .upload(imgFile, buf, { contentType: "image/jpeg", upsert: true });
+      
+      if (imgErr) throw new Error(`رفع فشل: ${imgErr.message}`);
+      
+      const { data: imgUrl } = supabase.storage.from("temp-files").getPublicUrl(imgFile);
+      log('INFO', `✅ صورة ${index + 1} نجحت (${(buf.byteLength / 1024).toFixed(1)}KB)`);
+      
+      return { buffer: buf, url: imgUrl.publicUrl };
       
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
