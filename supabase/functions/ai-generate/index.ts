@@ -3,6 +3,7 @@ import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { generateVoiceoverScript, generateImagePrompts } from "../_shared/gemini.ts";
 import { generateSpeech } from "../_shared/elevenlabs.ts";
 import { generateImageWithFlux } from "../_shared/huggingface.ts";
+import { startMergeWithFFmpeg } from "../_shared/huggingface.ts";
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -22,18 +23,13 @@ interface StepIds {
   publishStep?: string;
 }
 
-// ====== ENHANCED LOGGING ======
-function logWithTimestamp(level: 'INFO' | 'ERROR' | 'WARN', message: string, data?: any) {
-  const timestamp = new Date().toISOString();
-  const prefix = `[AI-GEN] [${level}] [${timestamp}]`;
-  
-  if (level === 'ERROR') {
-    console.error(prefix, message, data ? JSON.stringify(data, null, 2) : '');
-  } else if (level === 'WARN') {
-    console.warn(prefix, message, data ? JSON.stringify(data, null, 2) : '');
-  } else {
-    console.log(prefix, message, data ? JSON.stringify(data, null, 2) : '');
-  }
+// ====== LOGGING ======
+function log(level: 'INFO' | 'ERROR' | 'WARN', msg: string, data?: any) {
+  const ts = new Date().toISOString();
+  const prefix = `[AI-GEN] [${level}] [${ts}]`;
+  if (level === 'ERROR') console.error(prefix, msg, data || '');
+  else if (level === 'WARN') console.warn(prefix, msg, data || '');
+  else console.log(prefix, msg, data || '');
 }
 
 async function createJobStep(jobId: string, stepName: string, stepOrder: number): Promise<string | undefined> {
@@ -53,13 +49,11 @@ async function createJobStep(jobId: string, stepName: string, stepOrder: number)
 
 async function updateStep(id: string | undefined, status: string, err?: string, out?: Record<string, unknown>) {
   if (!id) return;
-  
   const u: Record<string, unknown> = { status };
   if (status === "processing") u.started_at = new Date().toISOString();
   if (status === "completed" || status === "failed") u.completed_at = new Date().toISOString();
   if (err) u.error_message = err;
   if (out) u.output_data = out;
-  
   await supabase.from("job_steps").update(u).eq("id", id);
 }
 
@@ -69,7 +63,7 @@ async function updateProgress(jobId: string, progress: number, status?: string) 
   await supabase.from("jobs").update(u).eq("id", jobId);
 }
 
-// ====== ENHANCED IMAGE GENERATION WITH RETRY ======
+// ====== IMAGE GENERATION WITH RETRY ======
 async function generateSingleImageWithRetry(
   prompt: string,
   index: number,
@@ -79,10 +73,9 @@ async function generateSingleImageWithRetry(
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      logWithTimestamp('INFO', `🖼️ صورة ${index + 1}: محاولة ${attempt}/${maxRetries}`);
+      log('INFO', `🖼️ صورة ${index + 1}: محاولة ${attempt}/${maxRetries}`);
       
-      // Add timeout protection
-      const timeoutMs = 60000; // 60 seconds per image
+      const timeoutMs = 60000;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
       
@@ -91,18 +84,17 @@ async function generateSingleImageWithRetry(
         clearTimeout(timeoutId);
         
         if (!buf || buf.byteLength < 1000) {
-          throw new Error('صورة فارغة أو صغيرة جداً');
+          throw new Error('صورة فارغة');
         }
         
         const imgFile = `${jobId}/image_${index}.jpg`;
         const { error: imgErr } = await supabase.storage.from("temp-files")
           .upload(imgFile, buf, { contentType: "image/jpeg", upsert: true });
         
-        if (imgErr) throw new Error(`فشل رفع الصورة: ${imgErr.message}`);
+        if (imgErr) throw new Error(`رفع فشل: ${imgErr.message}`);
         
         const { data: imgUrl } = supabase.storage.from("temp-files").getPublicUrl(imgFile);
-        
-        logWithTimestamp('INFO', `✅ صورة ${index + 1} نجحت في المحاولة ${attempt}`);
+        log('INFO', `✅ صورة ${index + 1} نجحت`);
         
         return { buffer: buf, url: imgUrl.publicUrl };
         
@@ -113,16 +105,14 @@ async function generateSingleImageWithRetry(
       
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      logWithTimestamp('WARN', `❌ صورة ${index + 1} فشلت في المحاولة ${attempt}/${maxRetries}: ${errorMsg}`);
+      log('WARN', `❌ صورة ${index + 1} فشلت في ${attempt}/${maxRetries}: ${errorMsg}`);
       
       if (attempt === maxRetries) {
-        logWithTimestamp('ERROR', `🚫 صورة ${index + 1} فشلت نهائياً بعد ${maxRetries} محاولات`);
+        log('ERROR', `🚫 صورة ${index + 1} فشلت نهائياً`);
         return null;
       }
       
-      // Wait before retry with exponential backoff
       const waitTime = Math.min(5000 * attempt, 15000);
-      logWithTimestamp('INFO', `⏳ انتظار ${waitTime}ms قبل إعادة المحاولة...`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
   }
@@ -140,7 +130,7 @@ serve(async (req) => {
     jobId = body.job_id;
     if (!jobId) throw new Error("job_id مطلوب");
 
-    logWithTimestamp('INFO', `▶ بدء المهمة: ${jobId}`);
+    log('INFO', `▶ بدء المهمة: ${jobId}`);
     await supabase.from("jobs").update({ status: "processing", progress: 1 }).eq("id", jobId);
 
     const { data: job, error: jobErr } = await supabase.from("jobs").select("*").eq("id", jobId).single();
@@ -156,13 +146,13 @@ serve(async (req) => {
       publishStep: await createJobStep(jobId, "publishing",        5),
     };
     
-    logWithTimestamp('INFO', '✅ تم إنشاء الخطوات');
+    log('INFO', '✅ خطوات جاهزة');
 
     const task = processJob(jobId, inputData, steps);
 
     if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
       EdgeRuntime.waitUntil(task);
-      logWithTimestamp('INFO', '✅ استخدام EdgeRuntime.waitUntil');
+      log('INFO', '✅ استخدام EdgeRuntime.waitUntil');
     } else {
       await task;
     }
@@ -174,7 +164,7 @@ serve(async (req) => {
     
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logWithTimestamp('ERROR', `خطأ: ${msg}`);
+    log('ERROR', `خطأ: ${msg}`);
     if (jobId) {
       await supabase.from("jobs")
         .update({ status: "failed", error_message: msg })
@@ -188,15 +178,15 @@ serve(async (req) => {
   }
 });
 
-// ====== MAIN PROCESSING FUNCTION ======
+// ====== MAIN PROCESSING ======
 async function processJob(jobId: string, inputData: JobInputData, steps: StepIds) {
   const startTime = Date.now();
   
   try {
     await updateProgress(jobId, 5);
 
-    // ─── السكريبت ──────────────────────────────────────────
-    logWithTimestamp('INFO', '📝 بدء توليد السكريبت...');
+    // ─── SCRIPT ──────────────────────────────────────────
+    log('INFO', '📝 توليد السكريبت...');
     await updateStep(steps.scriptStep, "processing");
     
     const script = await generateVoiceoverScript(
@@ -205,12 +195,12 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       inputData.duration
     );
     
-    logWithTimestamp('INFO', `✅ السكريبت جاهز (${script.length} حرف)`);
+    log('INFO', `✅ السكريبت (${script.length} حرف)`);
     await updateStep(steps.scriptStep, "completed", undefined, { script });
     await updateProgress(jobId, 15);
 
-    // ─── الصوت ────────────────────────────────────────────
-    logWithTimestamp('INFO', '🎤 بدء توليد الصوت...');
+    // ─── VOICE ───────────────────────────────────────────
+    log('INFO', '🎤 توليد الصوت...');
     await updateStep(steps.voiceStep, "processing");
     
     const voiceId = inputData.voice_type === "female_arabic" 
@@ -228,23 +218,21 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
 
     const { data: audioUrlData } = supabase.storage.from("temp-files").getPublicUrl(audioFile);
     
-    logWithTimestamp('INFO', `✅ الصوت جاهز`);
+    log('INFO', `✅ الصوت جاهز`);
     await updateStep(steps.voiceStep, "completed", undefined, { audio_url: audioUrlData.publicUrl });
     await updateProgress(jobId, 35);
 
-    // ─── الصور مع معالجة محسّنة ────────────────────────
-    logWithTimestamp('INFO', '🖼️ بدء توليد الصور...');
+    // ─── IMAGES ──────────────────────────────────────────
+    log('INFO', '🖼️ توليد الصور...');
     await updateStep(steps.imageStep, "processing");
 
     const count = Math.max(1, Math.min(inputData.scene_count || 3, 20));
     const prompts = await generateImagePrompts(script, count);
     
-    logWithTimestamp('INFO', `✅ تم توليد ${prompts.length} prompts`);
-
+    log('INFO', `✅ ${prompts.length} prompts جاهزة`);
     if (prompts.length === 0) throw new Error("لم يُولَّد أي prompt");
 
-    // ====== OPTIMIZED BATCH PROCESSING ======
-    const BATCH_SIZE = 3; // تقليل حجم الدفعة من 10 إلى 3 لتجنب التحميل الزائد
+    const BATCH_SIZE = 3;
     const imageUrls: string[] = [];
     const failedIndices: number[] = [];
 
@@ -253,84 +241,112 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       const bNum = Math.floor(b / BATCH_SIZE) + 1;
       const tBatches = Math.ceil(prompts.length / BATCH_SIZE);
       
-      logWithTimestamp('INFO', `📦 دفعة ${bNum}/${tBatches} (${batch.length} صور)`);
+      log('INFO', `📦 دفعة ${bNum}/${tBatches} (${batch.length} صور)`);
 
-      // Process batch with individual retry logic
       const results = await Promise.allSettled(
         batch.map(async (prompt, j) => {
           const i = b + j;
           const result = await generateSingleImageWithRetry(prompt, i, jobId, 3);
           
           if (result) {
-            logWithTimestamp('INFO', `✅ صورة ${i + 1}/${prompts.length} نجحت`);
+            log('INFO', `✅ صورة ${i + 1}/${prompts.length}`);
             return result.url;
           } else {
-            logWithTimestamp('ERROR', `❌ صورة ${i + 1}/${prompts.length} فشلت نهائياً`);
+            log('ERROR', `❌ صورة ${i + 1}/${prompts.length} فشلت`);
             failedIndices.push(i);
             return null;
           }
         })
       );
 
-      // Collect successful results
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
           imageUrls.push(result.value);
         }
       }
 
-      // Update progress after each batch
-      const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 35);
+      const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 30); // حتى 65%
       await updateProgress(jobId, prog);
-      
-      logWithTimestamp('INFO', `📊 التقدم: ${imageUrls.length}/${prompts.length} صورة جاهزة`);
+      log('INFO', `📊 ${imageUrls.length}/${prompts.length} صورة`);
     }
 
-    // ====== VALIDATION ======
     const successRate = imageUrls.length / prompts.length;
-    logWithTimestamp('INFO', `📊 نتيجة نهائية: ${imageUrls.length}/${prompts.length} صورة (${(successRate * 100).toFixed(1)}%)`);
+    log('INFO', `📊 نتيجة: ${imageUrls.length}/${prompts.length} (${(successRate * 100).toFixed(1)}%)`);
 
-    // Require at least 50% success
-    if (imageUrls.length === 0) {
-      throw new Error('فشل توليد جميع الصور');
-    }
-    
-    if (successRate < 0.5) {
-      logWithTimestamp('WARN', `⚠️ نسبة نجاح منخفضة: ${(successRate * 100).toFixed(1)}%`);
-    }
+    if (imageUrls.length === 0) throw new Error('فشل توليد جميع الصور');
+    if (successRate < 0.5) log('WARN', `⚠️ نسبة نجاح منخفضة`);
+    if (failedIndices.length > 0) log('WARN', `⚠️ فشل: ${failedIndices.join(', ')}`);
 
-    if (failedIndices.length > 0) {
-      logWithTimestamp('WARN', `⚠️ الصور الفاشلة: ${failedIndices.join(', ')}`);
-    }
-
-    // ====== FINALIZE IMAGE STEP ======
     await updateStep(steps.imageStep, "completed", undefined, {
       image_urls: imageUrls,
       total_requested: prompts.length,
       total_succeeded: imageUrls.length,
-      total_failed: failedIndices.length,
       failed_indices: failedIndices,
       success_rate: successRate
     });
 
-    // ====== PREPARE FOR MERGE ======
-    await updateStep(steps.mergeStep, "pending", undefined, {
-      image_urls: imageUrls,
-      audio_url: audioUrlData.publicUrl,
-      ready_for_merge: true,
-      images_count: imageUrls.length
-    });
+    await updateProgress(jobId, 70);
 
-    await updateProgress(jobId, 72);
-    
-    const duration = Math.round((Date.now() - startTime) / 1000);
-    logWithTimestamp('INFO', `✅ اكتمل التوليد في ${duration}s - جاهز للدمج (${imageUrls.length} صور)`);
+    // ─── MERGE (START IMMEDIATELY!) ─────────────────────
+    log('INFO', '🔀 بدء الدمج مباشرة...');
+    await updateStep(steps.mergeStep, "processing");
+    await updateProgress(jobId, 75);
+
+    try {
+      const mergeResult = await startMergeWithFFmpeg({
+        images: imageUrls,
+        audio: audioUrlData.publicUrl,
+        output_format: "mp4",
+      });
+
+      log('INFO', `🔀 نتيجة الدمج: ${mergeResult.status}`, {
+        has_output: !!mergeResult.output_url,
+        has_job_id: !!mergeResult.job_id
+      });
+
+      // اكتمل فوراً
+      if (mergeResult.output_url) {
+        await updateStep(steps.mergeStep, "completed", undefined, { 
+          output_url: mergeResult.output_url 
+        });
+        await updateProgress(jobId, 100, "completed");
+        await supabase.from("jobs").update({ 
+          output_url: mergeResult.output_url 
+        }).eq("id", jobId);
+        
+        const duration = Math.round((Date.now() - startTime) / 1000);
+        log('INFO', `✅ اكتمل كل شيء في ${duration}s`);
+        
+      } 
+      // السيرفر يعالج - job-status سيتابع
+      else if (mergeResult.job_id) {
+        await updateStep(steps.mergeStep, "processing", undefined, {
+          provider_job_id: mergeResult.job_id,
+          provider: "ffmpeg-space",
+          started_at: new Date().toISOString()
+        });
+        await updateProgress(jobId, 80);
+        log('INFO', `✅ الدمج قيد المعالجة: ${mergeResult.job_id}`);
+      } 
+      // خطأ
+      else if (mergeResult.status === "failed") {
+        throw new Error(mergeResult.error || "فشل الدمج");
+      }
+
+    } catch (mergeError) {
+      const mergeMsg = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      log('ERROR', `❌ فشل الدمج: ${mergeMsg}`);
+      
+      await updateStep(steps.mergeStep, "failed", mergeMsg);
+      await updateProgress(jobId, 75); // نرجع للخلف قليلاً
+      
+      throw new Error(`فشل الدمج: ${mergeMsg}`);
+    }
 
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logWithTimestamp('ERROR', `❌ خطأ في المعالجة: ${msg}`);
+    log('ERROR', `❌ خطأ: ${msg}`);
     
-    // Mark all processing steps as failed
     for (const id of Object.values(steps)) {
       if (!id) continue;
       const { data } = await supabase.from("job_steps").select("status").eq("id", id).maybeSingle();
