@@ -4,9 +4,7 @@ import { generateVoiceoverScript, generateImagePrompts } from "../_shared/gemini
 import { generateSpeech } from "../_shared/elevenlabs.ts";
 import { generateImageWithFlux } from "../_shared/huggingface.ts";
 import { startMergeWithFFmpeg } from "../_shared/huggingface.ts";
-
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
-
 interface JobInputData {
   title: string;
   description: string;
@@ -14,7 +12,6 @@ interface JobInputData {
   scene_count: number;
   duration: number;
 }
-
 interface StepIds {
   scriptStep?: string;
   voiceStep?: string;
@@ -22,7 +19,6 @@ interface StepIds {
   mergeStep?: string;
   publishStep?: string;
 }
-
 // ====== LOGGING ======
 function log(level: 'INFO' | 'ERROR' | 'WARN', msg: string, data?: any) {
   const ts = new Date().toISOString();
@@ -31,7 +27,6 @@ function log(level: 'INFO' | 'ERROR' | 'WARN', msg: string, data?: any) {
   else if (level === 'WARN') console.warn(prefix, msg, data || '');
   else console.log(prefix, msg, data || '');
 }
-
 async function createJobStep(jobId: string, stepName: string, stepOrder: number): Promise<string | undefined> {
   const { data, error } = await supabase.from("job_steps")
     .upsert(
@@ -46,7 +41,6 @@ async function createJobStep(jobId: string, stepName: string, stepOrder: number)
   }
   return data?.id;
 }
-
 async function updateStep(id: string | undefined, status: string, err?: string, out?: Record<string, unknown>) {
   if (!id) return;
   const u: Record<string, unknown> = { status };
@@ -56,13 +50,11 @@ async function updateStep(id: string | undefined, status: string, err?: string, 
   if (out) u.output_data = out;
   await supabase.from("job_steps").update(u).eq("id", id);
 }
-
 async function updateProgress(jobId: string, progress: number, status?: string) {
   const u: Record<string, unknown> = { progress };
   if (status) u.status = status;
   await supabase.from("jobs").update(u).eq("id", jobId);
 }
-
 // ====== IMAGE GENERATION WITH RETRY ======
 async function generateSingleImageWithRetry(
   prompt: string,
@@ -109,25 +101,19 @@ async function generateSingleImageWithRetry(
   
   return null;
 }
-
 // ====== MAIN HANDLER ======
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
-
   let jobId = "";
   try {
     const body = await req.json();
     jobId = body.job_id;
     if (!jobId) throw new Error("job_id مطلوب");
-
     log('INFO', `▶ بدء المهمة: ${jobId}`);
     await supabase.from("jobs").update({ status: "processing", progress: 1 }).eq("id", jobId);
-
     const { data: job, error: jobErr } = await supabase.from("jobs").select("*").eq("id", jobId).single();
     if (jobErr || !job) throw new Error(`المهمة غير موجودة: ${jobId}`);
-
     const inputData = job.input_data as JobInputData;
-
     const steps: StepIds = {
       scriptStep:  await createJobStep(jobId, "script_generation", 1),
       voiceStep:   await createJobStep(jobId, "voice_generation",  2),
@@ -137,16 +123,13 @@ serve(async (req) => {
     };
     
     log('INFO', '✅ خطوات جاهزة');
-
     const task = processJob(jobId, inputData, steps);
-
     if (typeof EdgeRuntime !== "undefined" && EdgeRuntime?.waitUntil) {
       EdgeRuntime.waitUntil(task);
       log('INFO', '✅ استخدام EdgeRuntime.waitUntil');
     } else {
       await task;
     }
-
     return new Response(
       JSON.stringify({ status: "processing", job_id: jobId }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -167,14 +150,12 @@ serve(async (req) => {
     );
   }
 });
-
 // ====== MAIN PROCESSING ======
 async function processJob(jobId: string, inputData: JobInputData, steps: StepIds) {
   const startTime = Date.now();
   
   try {
     await updateProgress(jobId, 5);
-
     // ─── SCRIPT ──────────────────────────────────────────
     log('INFO', '📝 توليد السكريبت...');
     await updateStep(steps.scriptStep, "processing");
@@ -188,7 +169,6 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
     log('INFO', `✅ السكريبت (${script.length} حرف)`);
     await updateStep(steps.scriptStep, "completed", undefined, { script });
     await updateProgress(jobId, 15);
-
     // ─── VOICE ───────────────────────────────────────────
     log('INFO', '🎤 توليد الصوت...');
     await updateStep(steps.voiceStep, "processing");
@@ -199,40 +179,33 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
     
     const audioBuffer = await generateSpeech(script, voiceId);
     if (!audioBuffer) throw new Error("فشل توليد الصوت");
-
     const audioFile = `${jobId}/audio.mp3`;
     const { error: audioErr } = await supabase.storage.from("temp-files")
       .upload(audioFile, audioBuffer, { contentType: "audio/mpeg", upsert: true });
     
     if (audioErr) throw new Error(`فشل رفع الصوت: ${audioErr.message}`);
-
     const { data: audioUrlData } = supabase.storage.from("temp-files").getPublicUrl(audioFile);
     
     log('INFO', `✅ الصوت جاهز`);
     await updateStep(steps.voiceStep, "completed", undefined, { audio_url: audioUrlData.publicUrl });
     await updateProgress(jobId, 35);
-
     // ─── IMAGES ──────────────────────────────────────────
     log('INFO', '🖼️ توليد الصور...');
     await updateStep(steps.imageStep, "processing");
-
     const count = Math.max(1, Math.min(inputData.scene_count || 3, 20));
     const prompts = await generateImagePrompts(script, count);
     
     log('INFO', `✅ ${prompts.length} prompts جاهزة`);
     if (prompts.length === 0) throw new Error("لم يُولَّد أي prompt");
-
     const BATCH_SIZE = 3;
     const imageUrls: string[] = [];
     const failedIndices: number[] = [];
-
     for (let b = 0; b < prompts.length; b += BATCH_SIZE) {
       const batch = prompts.slice(b, b + BATCH_SIZE);
       const bNum = Math.floor(b / BATCH_SIZE) + 1;
       const tBatches = Math.ceil(prompts.length / BATCH_SIZE);
       
       log('INFO', `📦 دفعة ${bNum}/${tBatches} (${batch.length} صور)`);
-
       const results = await Promise.allSettled(
         batch.map(async (prompt, j) => {
           const i = b + j;
@@ -248,25 +221,20 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
           }
         })
       );
-
       for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
           imageUrls.push(result.value);
         }
       }
-
       const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 30); // حتى 65%
       await updateProgress(jobId, prog);
       log('INFO', `📊 ${imageUrls.length}/${prompts.length} صورة`);
     }
-
     const successRate = imageUrls.length / prompts.length;
     log('INFO', `📊 نتيجة: ${imageUrls.length}/${prompts.length} (${(successRate * 100).toFixed(1)}%)`);
-
     if (imageUrls.length === 0) throw new Error('فشل توليد جميع الصور');
     if (successRate < 0.5) log('WARN', `⚠️ نسبة نجاح منخفضة`);
     if (failedIndices.length > 0) log('WARN', `⚠️ فشل: ${failedIndices.join(', ')}`);
-
     await updateStep(steps.imageStep, "completed", undefined, {
       image_urls: imageUrls,
       total_requested: prompts.length,
@@ -274,26 +242,21 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       failed_indices: failedIndices,
       success_rate: successRate
     });
-
     await updateProgress(jobId, 70);
-
     // ─── MERGE (START IMMEDIATELY!) ─────────────────────
     log('INFO', '🔀 بدء الدمج مباشرة...');
     await updateStep(steps.mergeStep, "processing");
     await updateProgress(jobId, 75);
-
     try {
       const mergeResult = await startMergeWithFFmpeg({
         images: imageUrls,
         audio: audioUrlData.publicUrl,
         output_format: "mp4",
       });
-
       log('INFO', `🔀 نتيجة الدمج: ${mergeResult.status}`, {
         has_output: !!mergeResult.output_url,
         has_job_id: !!mergeResult.job_id
       });
-
       // اكتمل فوراً
       if (mergeResult.output_url) {
         await updateStep(steps.mergeStep, "completed", undefined, { 
@@ -322,7 +285,6 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       else if (mergeResult.status === "failed") {
         throw new Error(mergeResult.error || "فشل الدمج");
       }
-
     } catch (mergeError) {
       const mergeMsg = mergeError instanceof Error ? mergeError.message : String(mergeError);
       log('ERROR', `❌ فشل الدمج: ${mergeMsg}`);
@@ -332,7 +294,6 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       
       throw new Error(`فشل الدمج: ${mergeMsg}`);
     }
-
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log('ERROR', `❌ خطأ: ${msg}`);
