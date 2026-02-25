@@ -161,7 +161,7 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 // ===== IMAGE GENERATION WITH ENHANCED ERROR HANDLING =====
-const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "sk_E7DZagW8HKHCBUrMJjXm8bAhI2O1Pye9";
+const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "sk_J5xg0ae9RCwRbyyyHRKgvJIonbl1j9Do";
 async function tryPollinationsModel(
   prompt: string, 
   model: string, 
