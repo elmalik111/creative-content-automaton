@@ -235,7 +235,62 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
       logWarning(`فشل ${name}:`, msg);
     }
   }
-  throw new Error(`فشل توليد الصورة بجميع النماذج:\n${errors.join('\n')}`);
+  // 🔴 إذا فشل Pollinations تماماً (مثل خطأ 530 Cloudflare)، نحاول مباشرة مع Hugging Face Inference API
+  logWarning(`[FLUX] فشل Pollinations تماماً. جاري محاولة استخدام Hugging Face Inference API كبديل مباشر الطوارئ...`);
+  try {
+    const fallbackImage = await tryDirectHuggingFaceImage(prompt, 60000);
+    return fallbackImage;
+  } catch (hfErr) {
+    const msg = hfErr instanceof Error ? hfErr.message : String(hfErr);
+    errors.push(`Hugging Face Direct API: ${msg}`);
+  }
+  throw new Error(`فشل توليد الصورة بجميع النماذج والبدائل:\n${errors.join('\n')}`);
+}
+// =================================================================
+// DIRECT HUGGING FACE INFERENCE FALLBACK
+// =================================================================
+async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Promise<ArrayBuffer> {
+  const url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell";
+  
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  
+  const hfKey = typeof Deno !== "undefined" ? Deno.env.get("HF_READ_TOKEN") : HF_READ_TOKEN;
+  if (!hfKey) throw new Error("مفتاح HF_READ_TOKEN غير متوفر للبديل الطارئ");
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: {
+        "Authorization": `Bearer ${hfKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ inputs: prompt })
+    });
+    
+    clearTimeout(timer);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status} — ${body.slice(0, 100)}`);
+    }
+    const ctype = res.headers.get("content-type") ?? "";
+    if (!ctype.includes("image") && !ctype.includes("octet")) {
+      throw new Error(`استجابة غير صورة (${ctype})`);
+    }
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 5000) {
+      throw new Error(`صورة صغيرة جداً (${buf.byteLength}B)`);
+    }
+    logInfo(`[HF Direct] ✅ نجاح البديل: ${(buf.byteLength / 1024).toFixed(1)}KB`);
+    return buf;
+    
+  } catch (err) {
+    clearTimeout(timer);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`انتهت المهلة (${timeoutMs}ms)`);
+    }
+    throw err;
+  }
 }
 // ===== MERGE INTERFACES =====
 export interface MergeMediaRequest {
