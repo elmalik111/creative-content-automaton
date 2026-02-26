@@ -1,3 +1,25 @@
+
+
+
+Model
+Gemini 3.1 Pro (High)
+New
+Gemini 3.1 Pro (Low)
+New
+Gemini 3 Flash
+Claude Sonnet 4.6 (Thinking)
+Claude Opus 4.6 (Thinking)
+GPT-OSS 120B (Medium)
+
+
+
+
+
+huggingface.ts
+supabase/functions/_shared
+
+
+
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 // ===== LOGGING HELPERS =====
@@ -255,14 +277,11 @@ async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Pro
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   
-  const hfKey = typeof Deno !== "undefined" ? Deno.env.get("HF_READ_TOKEN") : HF_READ_TOKEN;
-  if (!hfKey) throw new Error("مفتاح HF_READ_TOKEN غير متوفر للبديل الطارئ");
   try {
     const res = await fetch(url, {
       method: "POST",
       signal: ctrl.signal,
       headers: {
-        "Authorization": `Bearer ${hfKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ inputs: prompt })
