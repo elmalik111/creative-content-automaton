@@ -250,7 +250,7 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
 // DIRECT HUGGING FACE INFERENCE FALLBACK
 // =================================================================
 async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Promise<ArrayBuffer> {
-  const url = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell";
+  const url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell";
   
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
