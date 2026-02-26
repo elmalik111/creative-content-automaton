@@ -148,13 +148,13 @@ export async function generateSpeech(
       errors.push(`${key.name}: ${msg}`);
     }
   }
-  // كل المفاتيح الجاهزة فشلت، الانتقال للبديل المجاني (Edge TTS / Azure)
-  console.log(`[ElevenLabs] فشلت جميع المفاتيح. جاري استخدام البديل المجاني (Microsoft Edge TTS)...`);
+  // كل المفاتيح الجاهزة فشلت، الانتقال للبديل المجاني (Google TTS)
+  console.log(`[ElevenLabs] فشلت جميع المفاتيح. جاري استخدام البديل المجاني (Google TTS)...`);
   try {
-    const fallbackAudio = await generateEdgeTTS(text, voiceId);
+    const fallbackAudio = await generateGoogleTTS(text);
     if (fallbackAudio) return fallbackAudio;
   } catch (fallbackErr) {
-    console.error(`[Edge TTS Fallback] خطأ: ${fallbackErr}`);
+    console.error(`[Google TTS Fallback] خطأ: ${fallbackErr}`);
   }
   const holdInfo = onHold.length > 0
     ? `\n(${onHold.length} مفاتيح في راحة مؤقتة، أقربها خلال ${Math.min(...onHold.map(k => cooldownMinutesLeft(k.id)))} دقيقة)`
@@ -165,44 +165,36 @@ export async function generateSpeech(
   );
 }
 // =================================================================
-// MICROSOFT EDGE TTS FALLBACK (Free Azure Neural Voices)
+// GOOGLE TTS FALLBACK (Stable Free Alternative)
 // =================================================================
-async function generateEdgeTTS(text: string, originalVoiceId: string): Promise<ArrayBuffer | null> {
-  // تحديد الصوت بناءً على معرف ElevenLabs التقريبي (ذكر أو أنثى)
-  // EXAVITQu4vr4xnSDxMaL (أنثى) -> سلمى المصرية
-  // onwK4e9ZLuTAKqWW03F9 (ذكر) -> حامد السعودي
-  const voice = originalVoiceId === "EXAVITQu4vr4xnSDxMaL" ? "ar-EG-SalmaNeural" : "ar-SA-HamedNeural";
+// Since api.tts.quest returned 404, we're using Google TTS as the ultimate failsafe.
+async function generateGoogleTTS(text: string): Promise<ArrayBuffer | null> {
+  console.log(`[Google TTS] طلب الصوت كبديل مجاني...`);
   
-  console.log(`[Edge TTS] طلب صوت: ${voice}...`);
+  // Google TTS has a roughly ~200 character limit per request. 
+  // For safety in this fallback, we truncate to the first 200 characters if it's too long.
+  // This ensures at least *some* audio is generated so merging doesn't completely fail.
+  const safeText = text.length > 200 ? text.substring(0, 195) + "..." : text;
+  const encodedText = encodeURIComponent(safeText);
   
-  // استخدام خدمة TTS مفتوحة توفر أصوات ميكروسوفت/أزور مجاناً
-  // ملاحظة: هذه الخدمة قد تستغرق بضع ثوانٍ للرد
-  const res = await fetch("https://api.tts.quest/v3/voiceover", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      text: text,
-      voice: voice,
-      format: "mp3",
-    })
+  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodedText}&tl=ar&client=tw-ob`;
+  
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+    }
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${errText}`);
+    throw new Error(`Google TTS HTTP ${res.status}: ${errText.substring(0, 100)}`);
   }
-  const data = await res.json();
-  if (!data.success || !data.data || !data.data.download_url) {
-    throw new Error("لم يتم إرجاع رابط تحميل من الخدمة.");
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength < 1000) {
+    throw new Error(`Google TTS أرجع ملفاً صغيراً جداً (${buf.byteLength} bytes)`);
   }
-  // انتظر قليلاً حتى يتم إنشاء الملف (الخدمة تعطيه رابطاً قد لا يكون جاهزاً في نفس المللي ثانية)
-  await new Promise(r => setTimeout(r, 2000));
   
-  // تحميل الملف الصوتي من الرابط المُرجع
-  const audioRes = await fetch(data.data.download_url);
-  if (!audioRes.ok) throw new Error(`فشل تحميل الصوت من ${data.data.download_url}`);
-  
-  const buf = await audioRes.arrayBuffer();
-  console.log(`[Edge TTS] ✅ ناجح — ${(buf.byteLength/1024).toFixed(1)}KB`);
+  console.log(`[Google TTS] ✅ ناجح — ${(buf.byteLength/1024).toFixed(1)}KB`);
   return buf;
 }
 // =================================================================
