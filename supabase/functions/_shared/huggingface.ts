@@ -1,25 +1,3 @@
-
-
-
-Model
-Gemini 3.1 Pro (High)
-New
-Gemini 3.1 Pro (Low)
-New
-Gemini 3 Flash
-Claude Sonnet 4.6 (Thinking)
-Claude Opus 4.6 (Thinking)
-GPT-OSS 120B (Medium)
-
-
-
-
-
-huggingface.ts
-supabase/functions/_shared
-
-
-
 const HF_READ_TOKEN = Deno.env.get("HF_READ_TOKEN")!;
 const HF_SPACE_URL = Deno.env.get("HF_SPACE_URL") || "https://elmalik-ff.hf.space";
 // ===== LOGGING HELPERS =====
@@ -184,6 +162,14 @@ async function wakeUpSpace(): Promise<void> {
 }
 // ===== IMAGE GENERATION WITH ENHANCED ERROR HANDLING =====
 const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "sk_E7DZagW8HKHCBUrMJjXm8bAhI2O1Pye9";
+// =================================================================
+// FIXED FALLBACK KEYS — لا تُستخدم إلا عند فشل المفاتيح المتغيرة
+// Pollinations key: لتوليد الصور (FLUX) عندما يفشل فيديو Seedance/Wan
+// HF keys: بديل أخير إذا تعطل Pollinations كذلك
+// =================================================================
+const POLLINATIONS_FLUX_KEY = "sk_h70QeDhVwdWdWUMprNYyzET72nVNazQQ";
+const HF_KEY_PRIMARY   = "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";
+const HF_KEY_SECONDARY = "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";
 async function tryPollinationsModel(
   prompt: string, 
   model: string, 
@@ -200,6 +186,7 @@ async function tryPollinationsModel(
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: {
+        "Authorization": `Bearer ${POLLINATIONS_FLUX_KEY}`,
         "Accept": "image/jpeg,image/*",
         "User-Agent": "Mozilla/5.0",
       },
@@ -269,11 +256,11 @@ export async function generateImageWithFlux(prompt: string): Promise<ArrayBuffer
   throw new Error(`فشل توليد الصورة بجميع النماذج والبدائل:\n${errors.join('\n')}`);
 }
 // =================================================================
-// DIRECT HUGGING FACE INFERENCE FALLBACK
+// DIRECT HUGGING FACE INFERENCE FALLBACK (حل أخير)
+// يُستخدم فقط إذا تعطل Pollinations كلياً (مثل خطأ 530 Cloudflare)
 // =================================================================
-async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Promise<ArrayBuffer> {
+async function tryHFWithKey(prompt: string, timeoutMs: number, hfKey: string): Promise<ArrayBuffer> {
   const url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell";
-  
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   
@@ -282,34 +269,41 @@ async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Pro
       method: "POST",
       signal: ctrl.signal,
       headers: {
+        "Authorization": `Bearer ${hfKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ inputs: prompt })
     });
-    
     clearTimeout(timer);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status} — ${body.slice(0, 100)}`);
+      throw new Error(`HTTP ${res.status} — ${body.slice(0, 150)}`);
     }
     const ctype = res.headers.get("content-type") ?? "";
     if (!ctype.includes("image") && !ctype.includes("octet")) {
       throw new Error(`استجابة غير صورة (${ctype})`);
     }
     const buf = await res.arrayBuffer();
-    if (buf.byteLength < 5000) {
-      throw new Error(`صورة صغيرة جداً (${buf.byteLength}B)`);
-    }
-    logInfo(`[HF Direct] ✅ نجاح البديل: ${(buf.byteLength / 1024).toFixed(1)}KB`);
+    if (buf.byteLength < 5000) throw new Error(`صورة صغيرة جداً (${buf.byteLength}B)`);
+    logInfo(`[HF Direct] ✅ نجاح FLUX الطوارئ: ${(buf.byteLength / 1024).toFixed(1)}KB`);
     return buf;
-    
   } catch (err) {
     clearTimeout(timer);
-    if (err instanceof Error && err.name === 'AbortError') {
-      throw new Error(`انتهت المهلة (${timeoutMs}ms)`);
-    }
+    if (err instanceof Error && err.name === 'AbortError') throw new Error(`انتهت المهلة (${timeoutMs}ms)`);
     throw err;
   }
+}
+async function tryDirectHuggingFaceImage(prompt: string, timeoutMs: number): Promise<ArrayBuffer> {
+  // نجرب المفتاح الأول أولاً
+  try {
+    const result = await tryHFWithKey(prompt, timeoutMs, HF_KEY_PRIMARY);
+    return result;
+  } catch (err1) {
+    const msg1 = err1 instanceof Error ? err1.message : String(err1);
+    logWarning(`[HF] المفتاح الأول فشل: ${msg1}`);
+  }
+  // إذا فشل الأول، نجرب المفتاح الثاني
+  return await tryHFWithKey(prompt, timeoutMs, HF_KEY_SECONDARY);
 }
 // ===== MERGE INTERFACES =====
 export interface MergeMediaRequest {
