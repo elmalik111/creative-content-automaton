@@ -42,10 +42,10 @@ export function TelegramSettings() {
       if (!user) return;
 
       // جلب الـ token الخاص بالـ user أولاً
-      const { data: ownToken } = await supabase
+      const { data: ownToken } = await (supabase
         .from('settings')
         .select('value')
-        .eq('key', 'telegram_token')
+        .eq('key', 'telegram_token') as any)
         .eq('user_id', user.id)
         .maybeSingle();
 
