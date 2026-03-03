@@ -140,9 +140,8 @@ export async function generateImagePrompts(
 
   // ─── خطوة 2: اطلب الـ prompts بشكل واضح ────────────────────────
   const topicLine = topic
-    ? `const topicLine = topic
-  ? `The core topic is: "${topic}". Key visual elements to emphasize: ${visuals || topic}.`
-  : `Analyze the visual imagery implied by this Arabic narration segment: "${script.slice(0, 300)}..."`;
+    ? `The core topic is: "${topic}". Key visual elements to emphasize: ${visuals || topic}.`
+    : `Analyze the visual imagery implied by this Arabic narration segment: "${script.slice(0, 300)}..."`;
 
 const imageGenPrompt =
   "You are a Master Cinematic Prompt Writer for state-of-the-art AI image models (like Flux).\n" +

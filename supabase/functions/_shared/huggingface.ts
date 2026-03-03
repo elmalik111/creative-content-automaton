@@ -161,15 +161,13 @@ async function wakeUpSpace(): Promise<void> {
   }
 }
 // ===== IMAGE GENERATION WITH ENHANCED ERROR HANDLING =====
-const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "sk_E7DZagW8HKHCBUrMJjXm8bAhI2O1Pye9";
+const POLLINATIONS_KEY = Deno.env.get("POLLINATIONS_API_KEY") || "";
 // =================================================================
-// FIXED FALLBACK KEYS — لا تُستخدم إلا عند فشل المفاتيح المتغيرة
-// Pollinations key: لتوليد الصور (FLUX) عندما يفشل فيديو Seedance/Wan
-// HF keys: بديل أخير إذا تعطل Pollinations كذلك
+// FALLBACK KEYS — loaded from secure environment secrets
 // =================================================================
-const POLLINATIONS_FLUX_KEY = "sk_h70QeDhVwdWdWUMprNYyzET72nVNazQQ";
-const HF_KEY_PRIMARY   = "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";
-const HF_KEY_SECONDARY = "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";
+const POLLINATIONS_FLUX_KEY = Deno.env.get("POLLINATIONS_API_KEY_FLUX") || POLLINATIONS_KEY;
+const HF_KEY_PRIMARY   = Deno.env.get("HF_KEY_PRIMARY") || Deno.env.get("HF_READ_TOKEN") || "";
+const HF_KEY_SECONDARY = Deno.env.get("HF_KEY_SECONDARY") || "";
 async function tryPollinationsModel(
   prompt: string, 
   model: string, 
