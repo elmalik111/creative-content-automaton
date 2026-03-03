@@ -232,8 +232,7 @@ export async function generateVideoMetadata(script: string): Promise<{
   hashtags: string[];
   tags: string[];
 }> {
-  const prompt = 
-   const metadataPrompt = 
+  const metadataPrompt = 
   "You are a World-Class Viral Content Strategist and SEO Expert for YouTube and Social Media.\n" +
   "Your mission is to analyze the provided Arabic video script and generate high-converting metadata to maximize CTR and search visibility.\n\n" +
   "SCRIPT FOR ANALYSIS:\n" +
@@ -254,7 +253,7 @@ export async function generateVideoMetadata(script: string): Promise<{
     "Script:\n" + script.slice(0, 800);
 
   try {
-    const raw = await generateWithGemini(prompt);
+    const raw = await generateWithGemini(metadataPrompt);
     console.log("[GEMINI] metadata raw:", raw.slice(0, 200));
     
     // استخراج JSON
