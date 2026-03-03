@@ -253,7 +253,7 @@ export async function generateVideoMetadata(script: string): Promise<{
     "Script:\n" + script.slice(0, 800);
 
   try {
-    const raw = await generateWithGemini(prompt);
+    const raw = await generateWithGemini(metadataPrompt);
     console.log("[GEMINI] metadata raw:", raw.slice(0, 200));
     
     // استخراج JSON
