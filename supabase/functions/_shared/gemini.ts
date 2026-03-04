@@ -236,7 +236,7 @@ export async function generateVideoMetadata(script: string): Promise<{
   "You are a World-Class Viral Content Strategist and SEO Expert for YouTube and Social Media.\n" +
   "Your mission is to analyze the provided Arabic video script and generate high-converting metadata to maximize CTR and search visibility.\n\n" +
   "SCRIPT FOR ANALYSIS:\n" +
-  script + "\n\n" +
+  script.slice(0, 800) + "\n\n" +
   "GUIDELINES FOR GENERATION:\n" +
   "- **Title:** Must be a 'Magnetic Hook' in Arabic. Use curiosity, mystery, or a shocking fact from the script. Keep it under 60 characters for maximum mobile visibility.\n" +
   "- **Description:** Write 2-3 compelling Arabic sentences. Start with a hook that summarizes the most interesting part of the video, followed by a natural flow of keywords for SEO.\n" +
@@ -250,7 +250,6 @@ export async function generateVideoMetadata(script: string): Promise<{
   '  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"],\n' +
   '  "tags": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"]\n' +
   "}";
-    "Script:\n" + script.slice(0, 800);
 
   try {
     const raw = await generateWithGemini(metadataPrompt);

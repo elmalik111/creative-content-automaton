@@ -46,6 +46,7 @@ serve(async (req) => {
   }
 
   try {
+    console.log(`[TELEGRAM] طلب وارد: ${req.method} من ${req.headers.get("x-forwarded-for") || "unknown"}`);
     // ===== SECURITY: Validate Telegram Webhook Secret =====
     const telegramSecretToken = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
     const expectedSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
@@ -270,7 +271,6 @@ function parseCreateCommand(text: string): CreateCommand | null {
       case "عدد_المشاهد":
         data.scene_count = parseInt(value) || 5;
         break;
-      case "نوع_يوتيوب": (data as any).youtube_type = value === "long" ? "long" : "shorts"; break;
       case "نوع_يوتيوب": (data as any).youtube_type = value === "long" ? "long" : "shorts"; break;
       case "الطول":
         data.duration = parseInt(value) || 60;
