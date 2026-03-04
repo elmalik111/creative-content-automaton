@@ -72,12 +72,20 @@ serve(async (req) => {
     const chatId = body.message.chat.id;
     const text = body.message.text;
 
-    // Get Telegram token from settings
-    const { data: tokenSetting } = await supabase
+    // Get Telegram token (prefer latest user token, then shared/global)
+    const { data: tokenSetting, error: tokenError } = await supabase
       .from("settings")
       .select("value")
       .eq("key", "telegram_token")
+      .not("value", "is", null)
+      .order("updated_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
+
+    if (tokenError) {
+      console.error("Failed to load telegram token:", tokenError.message);
+      return new Response("OK", { headers: corsHeaders });
+    }
 
     const telegramToken = tokenSetting?.value;
 
