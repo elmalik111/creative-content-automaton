@@ -431,21 +431,56 @@ async function verifyFacebook(): Promise<Response> {
   }
 }
 
-async function verifyTelegram(action?: string): Promise<Response> {
-  const { data: tokenSetting } = await supabase
+async function getTelegramTokenForUser(userId?: string): Promise<string | null> {
+  // 1) user-specific token
+  if (userId) {
+    const { data: ownToken, error: ownErr } = await supabase
+      .from("settings")
+      .select("value")
+      .eq("key", "telegram_token")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!ownErr && ownToken?.value) return ownToken.value;
+  }
+
+  // 2) shared/global token
+  const { data: sharedToken, error: sharedErr } = await supabase
     .from("settings")
     .select("value")
     .eq("key", "telegram_token")
+    .is("user_id", null)
     .maybeSingle();
 
-  if (!tokenSetting?.value) {
+  if (!sharedErr && sharedToken?.value) return sharedToken.value;
+
+  // 3) latest fallback to avoid maybeSingle failures when multiple users have tokens
+  const { data: latestToken, error: latestErr } = await supabase
+    .from("settings")
+    .select("value")
+    .eq("key", "telegram_token")
+    .not("value", "is", null)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (latestErr) {
+    console.error("[verify-telegram] failed to load telegram token", latestErr.message);
+    return null;
+  }
+
+  return latestToken?.value ?? null;
+}
+
+async function verifyTelegram(action?: string, userId?: string): Promise<Response> {
+  const botToken = await getTelegramTokenForUser(userId);
+
+  if (!botToken) {
     return new Response(
       JSON.stringify({ valid: false, error: "No Telegram token found" }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-
-  const botToken = tokenSetting.value;
 
   // Handle webhook registration
   if (action === "register_webhook") {
