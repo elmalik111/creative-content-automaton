@@ -74,7 +74,7 @@ serve(async (req) => {
       case "facebook":
         return await verifyFacebook();
       case "telegram":
-        return await verifyTelegram(action);
+        return await verifyTelegram(action, auth.userId);
       case "elevenlabs":
         return await verifyElevenLabs(token);
       default:
