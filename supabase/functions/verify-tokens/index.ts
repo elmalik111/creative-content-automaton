@@ -11,14 +11,21 @@ interface VerifyRequest {
   action?: "verify" | "register_webhook" | "check_webhook"; // For Telegram actions
 }
 
+interface AuthContext {
+  valid: boolean;
+  error?: string;
+  userId?: string;
+  isServiceRole?: boolean;
+}
+
 // ===== AUTH HELPER: Require any authenticated user =====
-async function validateAuth(req: Request): Promise<{ valid: boolean; error?: string }> {
+async function validateAuth(req: Request): Promise<AuthContext> {
   const authHeader = req.headers.get("Authorization");
   
   // Check for service role key (internal calls)
   const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
   if (authHeader === `Bearer ${serviceRoleKey}`) {
-    return { valid: true };
+    return { valid: true, isServiceRole: true };
   }
   
   // Check for user JWT
@@ -38,7 +45,7 @@ async function validateAuth(req: Request): Promise<{ valid: boolean; error?: str
     return { valid: false, error: "Invalid or expired token" };
   }
   
-  return { valid: true };
+  return { valid: true, userId: userData.user.id };
 }
 
 serve(async (req) => {
