@@ -8,7 +8,7 @@ interface ElevenLabsKey {
 }
 // =================================================================
 // COOLDOWN MAP — in-memory
-// unusual_activity = مؤقت (10-120 دقيقة) لا يُعطّل المفتاح نهائياً
+// unusual_activity = مؤقت (30 دقيقة) لا يُعطّل المفتاح نهائياً
 // =================================================================
 const cooldownMap = new Map<string, number>(); // keyId → timestamp انتهاء الراحة
 function isInCooldown(keyId: string): boolean {
@@ -18,12 +18,12 @@ function isInCooldown(keyId: string): boolean {
   return true;
 }
 function setCooldown(keyId: string, minutes: number, name: string) {
-  cooldownMap.set(keyId, Date.now() + minutes * 3_000);
+  cooldownMap.set(keyId, Date.now() + minutes * 60_000);
   console.log(`[ElevenLabs] ⏳ cooldown ${minutes}د للمفتاح "${name}"`);
 }
 function cooldownMinutesLeft(keyId: string): number {
   const until = cooldownMap.get(keyId) ?? 0;
-  return Math.ceil(Math.max(0, until - Date.now()) / 3_000);
+  return Math.ceil(Math.max(0, until - Date.now()) / 60_000);
 }
 // =================================================================
 // FETCH ACTIVE KEYS — الأقل استخداماً أولاً
@@ -47,7 +47,7 @@ function classifyError(status: number, body: string): Action {
   if (b.includes("invalid_api_key") || b.includes("api key is invalid")) return "deactivate";
   // حصة شهرية انتهت
   if (b.includes("quota_exceeded"))  return "deactivate";
-  // نشاط غير عادي — مؤقت، راحة فقط
+  // نشاط غير عادي — مؤقت، راحة 30 دقيقة فقط
   if (b.includes("unusual_activity") || b.includes("detected_unusual")) return "cooldown";
   // rate limit
   if (status === 429) return "cooldown";
@@ -57,7 +57,14 @@ function classifyError(status: number, body: string): Action {
   return "skip";
 }
 // =================================================================
-// GENERATE SPEECH
+// RANDOM DELAY — لتقليل احتمال الحظر من ElevenLabs
+// =================================================================
+function randomDelay(): Promise<void> {
+  const ms = 1000 + Math.random() * 2000; // 1-3 ثوانٍ
+  return new Promise(r => setTimeout(r, ms));
+}
+// =================================================================
+// GENERATE SPEECH — ElevenLabs فقط، بدون بدائل
 // =================================================================
 export async function generateSpeech(
   text: string,
@@ -65,7 +72,7 @@ export async function generateSpeech(
 ): Promise<ArrayBuffer | null> {
   const allKeys = await getActiveKeys();
   if (allKeys.length === 0)
-    throw new Error("لا توجد مفاتيح ElevenLabs. أضف مفتاحاً من الإعدادات.");
+    throw new Error("لا توجد مفاتيح ElevenLabs نشطة. أضف مفتاحاً من الإعدادات أو أعد تفعيل المفاتيح الموجودة.");
   // فصل المتاح عن المحجوب مؤقتاً
   const ready    = allKeys.filter(k => !isInCooldown(k.id));
   const onHold   = allKeys.filter(k =>  isInCooldown(k.id));
@@ -81,6 +88,8 @@ export async function generateSpeech(
   const errors: string[] = [];
   for (const key of ready) {
     console.log(`[ElevenLabs] جارٍ التجربة — مفتاح: "${key.name}"`);
+    // تأخير عشوائي لتقليل احتمال الحظر
+    await randomDelay();
     // تسجيل الاستخدام (non-blocking)
     supabase.from("elevenlabs_keys")
       .update({ usage_count: key.usage_count + 1, last_used_at: new Date().toISOString() })
@@ -99,7 +108,7 @@ export async function generateSpeech(
             text,
             model_id: "eleven_multilingual_v2",
             voice_settings: {
-              stability: 0.75,
+              stability: 0.5,
               similarity_boost: 0.75,
               style: 0.0,
               use_speaker_boost: true,
@@ -128,15 +137,17 @@ export async function generateSpeech(
       const action  = classifyError(res.status, errBody);
       console.error(`[ElevenLabs] ❌ "${key.name}" HTTP ${res.status} action=${action} | ${errBody.slice(0,100)}`);
       if (action === "deactivate") {
-        await supabase.from("elevenlabs_keys").update({ is_active: false }).eq("id", key.id);
+        await supabase.from("elevenlabs_keys").update({
+          is_active: false,
+          deactivated_at: new Date().toISOString(),
+          deactivation_reason: errBody.slice(0, 200),
+        }).eq("id", key.id);
         errors.push(`${key.name}: مُعطَّل نهائياً (مفتاح منتهٍ أو حصة شهرية)`);
       } else if (action === "cooldown") {
-        if (errBody.includes("unusual_activity") || errBody.includes("detected_unusual")) {
-          errors.push(`${key.name}: نشاط غير عادي (ElevenLabs يحظر السيرفرات السحابية للحسابات المجانية. جرب الترقية لـ Starter)`);
-        } else {
-          setCooldown(key.id, 1, key.name); // قللنا المدة إلى دقيقة واحدة بدلاً من 10 دقائق
-          errors.push(`${key.name}: ضغط طلبات — راحة 1 دقيقة`);
-        }
+        const isUnusual = errBody.toLowerCase().includes("unusual_activity") || errBody.toLowerCase().includes("detected_unusual");
+        const cooldownMins = isUnusual ? 30 : 2;
+        setCooldown(key.id, cooldownMins, key.name);
+        errors.push(`${key.name}: ${isUnusual ? "نشاط غير عادي" : "ضغط طلبات"} — راحة ${cooldownMins} دقيقة`);
       } else if (action === "fatal") {
         throw new Error(`[ElevenLabs] خطأ في البيانات (400): ${errBody.slice(0, 200)}`);
       } else {
@@ -148,54 +159,14 @@ export async function generateSpeech(
       errors.push(`${key.name}: ${msg}`);
     }
   }
-  // كل المفاتيح الجاهزة فشلت، الانتقال للبديل المجاني (Google TTS)
-  console.log(`[ElevenLabs] فشلت جميع المفاتيح. جاري استخدام البديل المجاني (Google TTS)...`);
-  try {
-    const fallbackAudio = await generateGoogleTTS(text);
-    if (fallbackAudio) return fallbackAudio;
-  } catch (fallbackErr) {
-    console.error(`[Google TTS Fallback] خطأ: ${fallbackErr}`);
-  }
+  // كل المفاتيح الجاهزة فشلت — لا يوجد بديل
   const holdInfo = onHold.length > 0
     ? `\n(${onHold.length} مفاتيح في راحة مؤقتة، أقربها خلال ${Math.min(...onHold.map(k => cooldownMinutesLeft(k.id)))} دقيقة)`
     : "";
   throw new Error(
-    `فشلت جميع مفاتيح ElevenLabs وفشل البديل المجاني:\n` +
+    `فشلت جميع مفاتيح ElevenLabs:\n` +
     errors.join("\n") + holdInfo
   );
-}
-// =================================================================
-// GOOGLE TTS FALLBACK (Stable Free Alternative)
-// =================================================================
-// Since api.tts.quest returned 404, we're using Google TTS as the ultimate failsafe.
-async function generateGoogleTTS(text: string): Promise<ArrayBuffer | null> {
-  console.log(`[Google TTS] طلب الصوت كبديل مجاني...`);
-  
-  // Google TTS has a roughly ~200 character limit per request. 
-  // For safety in this fallback, we truncate to the first 200 characters if it's too long.
-  // This ensures at least *some* audio is generated so merging doesn't completely fail.
-  const safeText = text.length > 200 ? text.substring(0, 195) + "..." : text;
-  const encodedText = encodeURIComponent(safeText);
-  
-  const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodedText}&tl=ar&client=tw-ob`;
-  
-  const res = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent": "Mozilla/5.0",
-    }
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    throw new Error(`Google TTS HTTP ${res.status}: ${errText.substring(0, 100)}`);
-  }
-  const buf = await res.arrayBuffer();
-  if (buf.byteLength < 1000) {
-    throw new Error(`Google TTS أرجع ملفاً صغيراً جداً (${buf.byteLength} bytes)`);
-  }
-  
-  console.log(`[Google TTS] ✅ ناجح — ${(buf.byteLength/1024).toFixed(1)}KB`);
-  return buf;
 }
 // =================================================================
 // getNextElevenLabsKey — للاستخدام الخارجي

@@ -175,8 +175,9 @@ async function tryPollinationsModel(
 ): Promise<ArrayBuffer> {
   const seed = Math.floor(Math.random() * 2147483647);
   const encodedPrompt = encodeURIComponent(prompt);
-  const url = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=${model}&width=1080&height=1920&seed=${seed}&nologo=true`;
-  logInfo(`[POLLINATIONS] model=${model} seed=${seed}`);
+  // استخدام الرابط الجديد لـ Pollinations مع key كـ query parameter
+  const url = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&width=1080&height=1920&seed=${seed}&nologo=true${POLLINATIONS_FLUX_KEY ? `&key=${POLLINATIONS_FLUX_KEY}` : ""}`;
+  logInfo(`[POLLINATIONS] model=${model} seed=${seed} url=${url.slice(0, 120)}...`);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   
@@ -184,7 +185,6 @@ async function tryPollinationsModel(
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: {
-        "Authorization": `Bearer ${POLLINATIONS_FLUX_KEY}`,
         "Accept": "image/jpeg,image/*",
         "User-Agent": "Mozilla/5.0",
       },
