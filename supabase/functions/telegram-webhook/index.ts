@@ -46,6 +46,7 @@ serve(async (req) => {
   }
 
   try {
+    console.log(`[TELEGRAM] طلب وارد: ${req.method} من ${req.headers.get("x-forwarded-for") || "unknown"}`);
     // ===== SECURITY: Validate Telegram Webhook Secret =====
     const telegramSecretToken = req.headers.get("X-Telegram-Bot-Api-Secret-Token");
     const expectedSecret = Deno.env.get("TELEGRAM_WEBHOOK_SECRET");
