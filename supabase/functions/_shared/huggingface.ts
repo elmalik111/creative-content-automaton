@@ -352,8 +352,11 @@ export async function startMergeWithFFmpeg(
     }
   }
   // Step 2: Determine endpoint
+  // Always use /start-merge for multiple images (async processing)
+  // /merge only works reliably with a single image
   const hasVideos = request.videos && request.videos.length > 0;
-  const endpoint = hasVideos ? "/start-merge" : "/merge";
+  const hasMultipleImages = request.images && request.images.length > 1;
+  const endpoint = (hasVideos || hasMultipleImages) ? "/start-merge" : "/merge";
   const mergeUrl = `${HF_SPACE_URL}${endpoint}`;
   logInfo(`استخدام نقطة النهاية: ${mergeUrl}`);
   // Step 3: Prepare payload with proper structure
@@ -361,20 +364,16 @@ export async function startMergeWithFFmpeg(
     audio: request.audio,
     output_format: request.output_format || "mp4"
   };
+  if (request.images && request.images.length > 0) {
+    // Always send both formats for maximum compatibility with the HF Space
+    payload.images = request.images;
+    payload.image_urls = request.images;
+    if (request.images.length === 1) {
+      payload.imageUrl = request.images[0];
+    }
+  }
   if (hasVideos) {
     payload.videos = request.videos;
-    if (request.images && request.images.length > 0) {
-      payload.images = request.images;
-    }
-  } else {
-    // For /merge endpoint, use either imageUrl (single) or images (array)
-    if (request.images && request.images.length > 0) {
-      if (request.images.length === 1) {
-        payload.imageUrl = request.images[0];
-      } else {
-        payload.images = request.images;
-      }
-    }
   }
   logInfo("البيانات المرسلة:", {
     endpoint,
