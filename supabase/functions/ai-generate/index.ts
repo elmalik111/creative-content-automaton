@@ -197,7 +197,7 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
     
     log('INFO', `✅ ${prompts.length} prompts جاهزة`);
     if (prompts.length === 0) throw new Error("لم يُولَّد أي prompt");
-    const BATCH_SIZE = 3;
+    const BATCH_SIZE = 2; // reduced to avoid Pollinations rate limiting
     const imageUrls: string[] = [];
     const failedIndices: number[] = [];
     for (let b = 0; b < prompts.length; b += BATCH_SIZE) {
@@ -206,27 +206,30 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       const tBatches = Math.ceil(prompts.length / BATCH_SIZE);
       
       log('INFO', `📦 دفعة ${bNum}/${tBatches} (${batch.length} صور)`);
-      const results = await Promise.allSettled(
-        batch.map(async (prompt, j) => {
-          const i = b + j;
-          const result = await generateSingleImageWithRetry(prompt, i, jobId, 3);
-          
-          if (result) {
-            log('INFO', `✅ صورة ${i + 1}/${prompts.length}`);
-            return result.url;
-          } else {
-            log('ERROR', `❌ صورة ${i + 1}/${prompts.length} فشلت`);
-            failedIndices.push(i);
-            return null;
-          }
-        })
-      );
-      for (const result of results) {
-        if (result.status === 'fulfilled' && result.value) {
-          imageUrls.push(result.value);
+      
+      // Generate images sequentially within batch to avoid rate limiting
+      for (let j = 0; j < batch.length; j++) {
+        const i = b + j;
+        
+        // Add delay between requests to avoid rate limiting (except first)
+        if (i > 0) {
+          const delay = 3000 + Math.random() * 2000; // 3-5 seconds
+          log('INFO', `⏳ انتظار ${(delay/1000).toFixed(1)}s قبل الصورة ${i + 1}`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        const result = await generateSingleImageWithRetry(batch[j], i, jobId, 3);
+        
+        if (result) {
+          imageUrls.push(result.url);
+          log('INFO', `✅ صورة ${i + 1}/${prompts.length}`);
+        } else {
+          failedIndices.push(i);
+          log('ERROR', `❌ صورة ${i + 1}/${prompts.length} فشلت`);
         }
       }
-      const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 30); // حتى 65%
+      
+      const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 30);
       await updateProgress(jobId, prog);
       log('INFO', `📊 ${imageUrls.length}/${prompts.length} صورة`);
     }
