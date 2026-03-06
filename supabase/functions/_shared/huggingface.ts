@@ -352,36 +352,49 @@ export async function startMergeWithFFmpeg(
     }
   }
   // Step 2: Determine endpoint
-  // Always use /start-merge for multiple images (async processing)
-  // /merge only works reliably with a single image
-  const hasVideos = request.videos && request.videos.length > 0;
-  const hasMultipleImages = request.images && request.images.length > 1;
+  // Always use /start-merge for 2+ images (async processing)
+  const imageCount = request.images?.length ?? 0;
+  const videoCount = request.videos?.length ?? 0;
+  const hasVideos = videoCount > 0;
+  const hasMultipleImages = imageCount > 1;
   const endpoint = (hasVideos || hasMultipleImages) ? "/start-merge" : "/merge";
   const mergeUrl = `${HF_SPACE_URL}${endpoint}`;
   logInfo(`استخدام نقطة النهاية: ${mergeUrl}`);
-  // Step 3: Prepare payload with proper structure
-  const payload: any = {
+
+  // Step 3: Prepare payload with aggressive field compatibility
+  const payload: Record<string, unknown> = {
+    output_format: request.output_format || "mp4",
     audio: request.audio,
-    output_format: request.output_format || "mp4"
+    audioUrl: request.audio,
+    audio_url: request.audio,
+    audio_path: request.audio,
+    image_count: imageCount,
   };
-  if (request.images && request.images.length > 0) {
-    // Always send both formats for maximum compatibility with the HF Space
+
+  if (imageCount > 0 && request.images) {
     payload.images = request.images;
     payload.image_urls = request.images;
-    if (request.images.length === 1) {
-      payload.imageUrl = request.images[0];
-    }
+    payload.imageUrls = request.images;
+    payload.image_url = request.images;
+
+    // بعض السيرفرات تقرأ imageUrl فقط
+    payload.imageUrl = imageCount === 1 ? request.images[0] : request.images;
+    payload.primary_image = request.images[0];
   }
-  if (hasVideos) {
+
+  if (hasVideos && request.videos) {
     payload.videos = request.videos;
+    payload.video_urls = request.videos;
   }
+
   logInfo("البيانات المرسلة:", {
     endpoint,
-    hasImages: !!request.images?.length,
-    hasVideos: !!request.videos?.length,
+    hasImages: imageCount > 0,
+    hasVideos,
     hasAudio: !!request.audio,
-    imageCount: request.images?.length || 0,
-    videoCount: request.videos?.length || 0
+    imageCount,
+    videoCount,
+    payloadKeys: Object.keys(payload),
   });
   // Step 4: Make request with timeout
   const controller = new AbortController();
