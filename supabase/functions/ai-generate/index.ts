@@ -200,26 +200,27 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
     const BATCH_SIZE = 2; // reduced to avoid Pollinations rate limiting
     const imageUrls: string[] = [];
     const failedIndices: number[] = [];
+
     for (let b = 0; b < prompts.length; b += BATCH_SIZE) {
       const batch = prompts.slice(b, b + BATCH_SIZE);
       const bNum = Math.floor(b / BATCH_SIZE) + 1;
       const tBatches = Math.ceil(prompts.length / BATCH_SIZE);
-      
+
       log('INFO', `📦 دفعة ${bNum}/${tBatches} (${batch.length} صور)`);
-      
+
       // Generate images sequentially within batch to avoid rate limiting
       for (let j = 0; j < batch.length; j++) {
         const i = b + j;
-        
+
         // Add delay between requests to avoid rate limiting (except first)
         if (i > 0) {
           const delay = 3000 + Math.random() * 2000; // 3-5 seconds
           log('INFO', `⏳ انتظار ${(delay/1000).toFixed(1)}s قبل الصورة ${i + 1}`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
-        
+
         const result = await generateSingleImageWithRetry(batch[j], i, jobId, 3);
-        
+
         if (result) {
           imageUrls.push(result.url);
           log('INFO', `✅ صورة ${i + 1}/${prompts.length}`);
@@ -228,20 +229,53 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
           log('ERROR', `❌ صورة ${i + 1}/${prompts.length} فشلت`);
         }
       }
-      
+
       const prog = 35 + Math.round(((b + batch.length) / prompts.length) * 30);
       await updateProgress(jobId, prog);
       log('INFO', `📊 ${imageUrls.length}/${prompts.length} صورة`);
     }
+
+    const minRequiredImages = prompts.length > 1 ? 2 : 1;
+
+    // Recovery pass: try failed prompts again before accepting a single-image video
+    if (imageUrls.length < minRequiredImages && failedIndices.length > 0) {
+      log('WARN', `♻️ محاولة إنقاذ الصور الفاشلة: ${failedIndices.length} صور`);
+
+      const retryTargets = [...failedIndices];
+      failedIndices.length = 0;
+
+      for (const idx of retryTargets) {
+        if (imageUrls.length >= minRequiredImages) break;
+
+        const retryDelay = 5000 + Math.random() * 3000; // 5-8 seconds
+        log('INFO', `⏳ إعادة محاولة الصورة ${idx + 1} بعد ${(retryDelay / 1000).toFixed(1)}s`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+
+        const recovered = await generateSingleImageWithRetry(prompts[idx], idx, jobId, 2);
+        if (recovered) {
+          imageUrls.push(recovered.url);
+          log('INFO', `✅ تم إنقاذ الصورة ${idx + 1}`);
+        } else {
+          failedIndices.push(idx);
+        }
+      }
+    }
+
     const successRate = imageUrls.length / prompts.length;
     log('INFO', `📊 نتيجة: ${imageUrls.length}/${prompts.length} (${(successRate * 100).toFixed(1)}%)`);
-    if (imageUrls.length === 0) throw new Error('فشل توليد جميع الصور');
+
+    if (imageUrls.length < minRequiredImages) {
+      throw new Error(`تم توليد ${imageUrls.length} صورة فقط من أصل ${prompts.length}. لن نكمل الدمج لتجنّب فيديو بصورة واحدة.`);
+    }
+
     if (successRate < 0.5) log('WARN', `⚠️ نسبة نجاح منخفضة`);
     if (failedIndices.length > 0) log('WARN', `⚠️ فشل: ${failedIndices.join(', ')}`);
+
     await updateStep(steps.imageStep, "completed", undefined, {
       image_urls: imageUrls,
       total_requested: prompts.length,
       total_succeeded: imageUrls.length,
+      min_required_images: minRequiredImages,
       failed_indices: failedIndices,
       success_rate: successRate
     });
