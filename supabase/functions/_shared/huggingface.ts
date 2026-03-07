@@ -474,7 +474,16 @@ export async function startMergeWithFFmpeg(
     error: rawResult.error,
     job_id: extractJobId(rawResult),
     message: rawResult.message,
-    diagnostics: { healthCheck, spaceWokenUp, attempts: 1 }
+    diagnostics: {
+      healthCheck,
+      spaceWokenUp,
+      attempts: 1,
+      endpoint,
+      requested_image_count: imageCount,
+      requested_video_count: videoCount,
+      provider_reported_image_count:
+        rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
+    },
   };
   return result;
 }
