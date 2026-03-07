@@ -353,15 +353,24 @@ export async function startMergeWithFFmpeg(
   }
   // Step 2: Determine endpoint
   // Always use /start-merge for 2+ images (async processing)
-  const imageCount = request.images?.length ?? 0;
-  const videoCount = request.videos?.length ?? 0;
+  const normalizedImages = Array.isArray(request.images)
+    ? [...new Set(request.images.map((u) => (typeof u === "string" ? u.trim() : "")).filter(Boolean))]
+    : [];
+  const normalizedVideos = Array.isArray(request.videos)
+    ? [...new Set(request.videos.map((u) => (typeof u === "string" ? u.trim() : "")).filter(Boolean))]
+    : [];
+
+  const imageCount = normalizedImages.length;
+  const videoCount = normalizedVideos.length;
   const hasVideos = videoCount > 0;
   const hasMultipleImages = imageCount > 1;
   const endpoint = (hasVideos || hasMultipleImages) ? "/start-merge" : "/merge";
   const mergeUrl = `${HF_SPACE_URL}${endpoint}`;
   logInfo(`استخدام نقطة النهاية: ${mergeUrl}`);
 
-  // Step 3: Prepare payload with aggressive field compatibility
+  // Step 3: Prepare payload with strict field mapping
+  // IMPORTANT: For multi-image merges, never send singular image fields (imageUrl/image_url/primary_image)
+  // because some providers prioritize them and fall back to one image only.
   const payload: Record<string, unknown> = {
     output_format: request.output_format || "mp4",
     audio: request.audio,
@@ -369,22 +378,26 @@ export async function startMergeWithFFmpeg(
     audio_url: request.audio,
     audio_path: request.audio,
     image_count: imageCount,
+    scene_count: imageCount,
+    require_all_images: hasMultipleImages,
   };
 
-  if (imageCount > 0 && request.images) {
-    payload.images = request.images;
-    payload.image_urls = request.images;
-    payload.imageUrls = request.images;
-    payload.image_url = request.images;
+  if (imageCount > 0) {
+    payload.images = normalizedImages;
+    payload.image_urls = normalizedImages;
+    payload.imageUrls = normalizedImages;
 
-    // بعض السيرفرات تقرأ imageUrl فقط
-    payload.imageUrl = imageCount === 1 ? request.images[0] : request.images;
-    payload.primary_image = request.images[0];
+    if (imageCount === 1) {
+      // Single-image compatibility aliases
+      payload.image_url = normalizedImages[0];
+      payload.imageUrl = normalizedImages[0];
+      payload.primary_image = normalizedImages[0];
+    }
   }
 
-  if (hasVideos && request.videos) {
-    payload.videos = request.videos;
-    payload.video_urls = request.videos;
+  if (hasVideos) {
+    payload.videos = normalizedVideos;
+    payload.video_urls = normalizedVideos;
   }
 
   logInfo("البيانات المرسلة:", {
@@ -461,8 +474,28 @@ export async function startMergeWithFFmpeg(
     error: rawResult.error,
     job_id: extractJobId(rawResult),
     message: rawResult.message,
-    diagnostics: { healthCheck, spaceWokenUp, attempts: 1 }
+    diagnostics: {
+      healthCheck,
+      spaceWokenUp,
+      attempts: 1,
+      endpoint,
+      requested_image_count: imageCount,
+      requested_video_count: videoCount,
+      provider_reported_image_count:
+        rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
+    },
   };
+  const providerImageCount = Number(
+    rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? NaN
+  );
+  if (hasMultipleImages && Number.isFinite(providerImageCount) && providerImageCount < 2) {
+    logWarning("⚠️ المزود أبلغ بعدد صور أقل من المتوقع", {
+      requested: imageCount,
+      providerImageCount,
+      rawResult,
+    });
+  }
+
   return result;
 }
 // ===== CHECK STATUS =====
