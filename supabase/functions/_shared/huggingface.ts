@@ -485,6 +485,17 @@ export async function startMergeWithFFmpeg(
         rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
     },
   };
+  const providerImageCount = Number(
+    rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? NaN
+  );
+  if (hasMultipleImages && Number.isFinite(providerImageCount) && providerImageCount < 2) {
+    logWarning("⚠️ المزود أبلغ بعدد صور أقل من المتوقع", {
+      requested: imageCount,
+      providerImageCount,
+      rawResult,
+    });
+  }
+
   return result;
 }
 // ===== CHECK STATUS =====
