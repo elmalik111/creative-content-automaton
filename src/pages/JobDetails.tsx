@@ -137,6 +137,45 @@ export default function JobDetails() {
     );
   }
 
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+  const toNumber = (...values: unknown[]): number | undefined => {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string' && value.trim()) {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const imageStep = job.steps.find((step) => step.step_name === 'image_generation');
+  const mergeStep = job.steps.find((step) => step.step_name === 'merge' || step.step_name === 'media_merge');
+  const imageOutput = asRecord(imageStep?.output_data);
+  const mergeOutput = asRecord(mergeStep?.output_data);
+  const mergeDiagnostics = asRecord(mergeOutput.diagnostics);
+
+  const sentImageCount = toNumber(
+    mergeOutput.requested_image_count,
+    imageOutput.total_succeeded,
+    Array.isArray(imageOutput.image_urls) ? imageOutput.image_urls.length : undefined
+  );
+
+  const providerImageCount = toNumber(
+    mergeOutput.provider_reported_image_count,
+    mergeDiagnostics.provider_reported_image_count,
+    mergeDiagnostics.received_images,
+    mergeOutput.image_count
+  );
+
+  const hasImageCounter = sentImageCount !== undefined || providerImageCount !== undefined;
+  const hasImageMismatch =
+    sentImageCount !== undefined &&
+    providerImageCount !== undefined &&
+    sentImageCount !== providerImageCount;
+
   return (
     <DashboardLayout>
       <div className="max-w-4xl mx-auto space-y-6">
