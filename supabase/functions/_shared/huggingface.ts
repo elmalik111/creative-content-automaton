@@ -368,10 +368,8 @@ export async function startMergeWithFFmpeg(
   const mergeUrl = `${HF_SPACE_URL}${endpoint}`;
   logInfo(`استخدام نقطة النهاية: ${mergeUrl}`);
 
-  // Step 3: Prepare payload with strict field mapping
-  // IMPORTANT: For multi-image merges, never send singular image fields (imageUrl/image_url/primary_image)
-  // because some providers prioritize them and fall back to one image only.
-  const payload: Record<string, unknown> = {
+  // Step 3: Prepare payload variants (strict multi-image)
+  const basePayload: Record<string, unknown> = {
     output_format: request.output_format || "mp4",
     audio: request.audio,
     audioUrl: request.audio,
@@ -380,67 +378,152 @@ export async function startMergeWithFFmpeg(
     image_count: imageCount,
     scene_count: imageCount,
     require_all_images: hasMultipleImages,
+    strict_multi_image: hasMultipleImages,
+    expected_image_count: imageCount,
   };
 
-  if (imageCount > 0) {
-    payload.images = normalizedImages;
-    payload.image_urls = normalizedImages;
-    payload.imageUrls = normalizedImages;
+  const payloadVariants: Array<{ name: string; payload: Record<string, unknown> }> = [];
+
+  if (hasMultipleImages) {
+    // نجرب صياغات متعددة بدون أي حقول مفردة لتفادي قفل المزود على صورة واحدة
+    payloadVariants.push({
+      name: "image_urls_only",
+      payload: {
+        ...basePayload,
+        image_urls: normalizedImages,
+      },
+    });
+
+    payloadVariants.push({
+      name: "images_only",
+      payload: {
+        ...basePayload,
+        images: normalizedImages,
+      },
+    });
+
+    payloadVariants.push({
+      name: "imageUrls_only",
+      payload: {
+        ...basePayload,
+        imageUrls: normalizedImages,
+      },
+    });
+  } else {
+    const singlePayload: Record<string, unknown> = {
+      ...basePayload,
+      images: normalizedImages,
+      image_urls: normalizedImages,
+      imageUrls: normalizedImages,
+    };
 
     if (imageCount === 1) {
-      // Single-image compatibility aliases
-      payload.image_url = normalizedImages[0];
-      payload.imageUrl = normalizedImages[0];
-      payload.primary_image = normalizedImages[0];
+      singlePayload.image_url = normalizedImages[0];
+      singlePayload.imageUrl = normalizedImages[0];
+      singlePayload.primary_image = normalizedImages[0];
     }
+
+    payloadVariants.push({ name: "single_or_video", payload: singlePayload });
   }
 
   if (hasVideos) {
-    payload.videos = normalizedVideos;
-    payload.video_urls = normalizedVideos;
+    for (const variant of payloadVariants) {
+      variant.payload.videos = normalizedVideos;
+      variant.payload.video_urls = normalizedVideos;
+    }
   }
 
-  logInfo("البيانات المرسلة:", {
+  logInfo("محاولات الإرسال:", {
     endpoint,
     hasImages: imageCount > 0,
     hasVideos,
     hasAudio: !!request.audio,
     imageCount,
     videoCount,
-    payloadKeys: Object.keys(payload),
+    payloadVariants: payloadVariants.map((v) => v.name),
   });
-  // Step 4: Make request with timeout
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120000); // 2 minutes
-  let response: Response;
-  let responseText: string;
-  
-  try {
-    response = await fetch(mergeUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${HF_READ_TOKEN}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    responseText = await response.text();
-    
-    logInfo(`استجابة HTTP ${response.status}`, responseText.slice(0, 200));
-    
-  } catch (fetchError) {
-    clearTimeout(timeout);
-    
-    if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-      throw new Error('انتهت مهلة طلب الدمج (2 دقيقة)');
+
+  // Step 4: Make request with timeout + fallback variant attempts
+  let response: Response | undefined;
+  let responseText = "";
+  let selectedVariant = "";
+  const attemptErrors: string[] = [];
+
+  for (const variant of payloadVariants) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120000); // 2 minutes
+
+    try {
+      logInfo(`إرسال الدمج عبر variant=${variant.name}`);
+
+      const candidateResponse = await fetch(mergeUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${HF_READ_TOKEN}`,
+        },
+        body: JSON.stringify(variant.payload),
+        signal: controller.signal,
+      });
+
+      const candidateText = await candidateResponse.text();
+      clearTimeout(timeout);
+
+      logInfo(`استجابة variant=${variant.name} HTTP ${candidateResponse.status}`, candidateText.slice(0, 220));
+
+      if (isHtmlErrorResponse(candidateText)) {
+        attemptErrors.push(`${variant.name}: HTML error page (HTTP ${candidateResponse.status})`);
+        continue;
+      }
+
+      if (!candidateResponse.ok) {
+        attemptErrors.push(`${variant.name}: HTTP ${candidateResponse.status} - ${candidateText.slice(0, 200)}`);
+        continue;
+      }
+
+      // فحص مبكر: إذا المزود أبلغ صراحة أنه استلم صورة واحدة فقط، نجرب variant آخر
+      if (hasMultipleImages) {
+        try {
+          const parsed = JSON.parse(candidateText);
+          const providerImageCount = Number(
+            parsed?.image_count ?? parsed?.images_count ?? parsed?.received_images ?? NaN
+          );
+
+          if (Number.isFinite(providerImageCount) && providerImageCount < 2) {
+            attemptErrors.push(
+              `${variant.name}: provider accepted only ${providerImageCount} image(s) while ${imageCount} requested`
+            );
+            logWarning("⚠️ المزود لم يقبل تعدد الصور — إعادة الإرسال بصيغة أخرى", {
+              variant: variant.name,
+              providerImageCount,
+              requested: imageCount,
+            });
+            continue;
+          }
+        } catch {
+          // التحليل النهائي سيتم لاحقاً في الخطوة التالية
+        }
+      }
+
+      response = candidateResponse;
+      responseText = candidateText;
+      selectedVariant = variant.name;
+      break;
+
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      const msg = fetchError instanceof Error && fetchError.name === "AbortError"
+        ? "انتهت مهلة طلب الدمج (2 دقيقة)"
+        : (fetchError instanceof Error ? fetchError.message : String(fetchError));
+      attemptErrors.push(`${variant.name}: ${msg}`);
     }
-    
-    throw new Error(
-      `فشل الاتصال بسيرفر الدمج:\n${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
-    );
   }
+
+  if (!response) {
+    throw new Error(`فشل الاتصال بسيرفر الدمج:\n${attemptErrors.join("\n")}`);
+  }
+
+  logInfo("تم اختيار variant نهائي للدمج", { selectedVariant, endpoint });
   // Step 5: Handle HTML error pages
   if (isHtmlErrorResponse(responseText)) {
     logError("السيرفر أرجع صفحة HTML بدلاً من JSON", responseText.slice(0, 300));
@@ -477,12 +560,14 @@ export async function startMergeWithFFmpeg(
     diagnostics: {
       healthCheck,
       spaceWokenUp,
-      attempts: 1,
+      attempts: Math.max(1, attemptErrors.length + 1),
       endpoint,
+      payload_variant: selectedVariant,
       requested_image_count: imageCount,
       requested_video_count: videoCount,
       provider_reported_image_count:
         rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
+      prior_attempt_errors: attemptErrors.length ? attemptErrors : undefined,
     },
   };
   const providerImageCount = Number(
@@ -499,18 +584,35 @@ export async function startMergeWithFFmpeg(
   return result;
 }
 // ===== CHECK STATUS =====
+function normalizeProviderStatus(rawStatus: unknown): MergeMediaResponse["status"] {
+  const s = String(rawStatus || "").toLowerCase().trim();
+  if (!s) return "processing";
+  if (["completed", "complete", "done", "success", "succeeded", "finished"].includes(s)) return "completed";
+  if (["failed", "error", "cancelled", "canceled", "timeout"].includes(s)) return "failed";
+  return "processing";
+}
+
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
   logInfo(`فحص حالة المهمة: ${jobId}`);
+
   const candidates = [
     { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
     { method: "GET" as const, url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status" },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}`, name: "GET /status?jobId" },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status?job_id=${encodeURIComponent(jobId)}`, name: "GET /status?job_id" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status {jobId}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { job_id: jobId }, name: "POST /status {job_id}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { jobId }, name: "POST /job-status {jobId}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" },
   ];
+
   const errors: string[] = [];
+
   for (const c of candidates) {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 15000);
+
       const resp = await fetch(c.url, {
         method: c.method,
         headers: {
@@ -520,25 +622,25 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
         signal: ctrl.signal,
       });
+
       clearTimeout(timer);
       const text = await resp.text();
+
       if (isHtmlErrorResponse(text)) {
         errors.push(`${c.name}: HTML error page (HTTP ${resp.status})`);
         continue;
       }
+
       if (resp.status === 404) {
-        return { 
-          status: "failed" as const, 
-          progress: 0, 
-          job_id: jobId,
-          error: "المهمة غير موجودة (قد يكون السيرفر أُعيد تشغيله)"
-        };
+        errors.push(`${c.name}: HTTP 404`);
+        continue;
       }
-      
+
       if (!resp.ok) {
         errors.push(`${c.name}: HTTP ${resp.status} - ${text.slice(0, 100)}`);
         continue;
       }
+
       let raw: any;
       try {
         raw = JSON.parse(text);
@@ -546,30 +648,38 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         errors.push(`${c.name}: Invalid JSON`);
         continue;
       }
-      logInfo(`✓ ${c.name} نجح`, raw);
+
+      const outputUrl = extractOutputUrl(raw);
+      const status = outputUrl
+        ? "completed"
+        : normalizeProviderStatus(
+            raw?.status ?? raw?.state ?? raw?.job_status ?? raw?.result?.status ?? raw?.data?.status
+          );
+
+      const rawProgress = Number(
+        raw?.progress ?? raw?.percentage ?? raw?.percent ?? raw?.result?.progress ?? raw?.data?.progress ?? 0
+      );
+      const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, rawProgress)) : 0;
+
+      logInfo(`✓ ${c.name} نجح`, { status, progress, hasOutput: !!outputUrl });
+
       return {
-        status: raw.status || "processing",
-        progress: raw.progress ?? 0,
-        output_url: extractOutputUrl(raw),
-        error: raw.error,
+        status,
+        progress,
+        output_url: outputUrl,
+        error: raw?.error || raw?.message,
         job_id: extractJobId(raw) || jobId,
-        message: raw.message,
+        message: raw?.message,
       };
-      
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
       errors.push(`${c.name}: ${errorMsg}`);
     }
   }
-  const errorSummary = `فشل فحص حالة المهمة ${jobId}:\n${errors.join('\n')}`;
+
+  const errorSummary = `تعذّر فحص الحالة للمهمة ${jobId}: ${errors.join(" | ")}`;
   logError(errorSummary);
-  
-  return { 
-    status: "failed" as const, 
-    progress: 0, 
-    job_id: jobId,
-    error: `تعذّر فحص الحالة: ${errors.join(" | ")}`
-  };
+  throw new Error(errorSummary);
 }
 // ===== MERGE WITH POLLING =====
 export async function mergeMediaWithFFmpeg(

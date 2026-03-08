@@ -124,6 +124,32 @@ serve(async (req) => {
     const providerJobId: string | undefined =
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
 
+    const autoStoppedByWatcher =
+      job.status === "failed" &&
+      !job.output_url &&
+      !!providerJobId &&
+      mergeStep?.status === "processing" &&
+      typeof job.error_message === "string" &&
+      (job.error_message.includes("توقفت المعالجة تلقائياً") ||
+        job.error_message.toLowerCase().includes("stopped") ||
+        job.error_message.toLowerCase().includes("auto"));
+
+    if (autoStoppedByWatcher) {
+      logInfo(`♻️ محاولة استعادة مهمة دمج متوقفة تلقائياً: ${jobId}`);
+      await supabase
+        .from("jobs")
+        .update({
+          status: "processing",
+          error_message: null,
+          progress: Math.max(80, job.progress || 0),
+        })
+        .eq("id", jobId);
+
+      job.status = "processing";
+      job.error_message = null;
+      job.progress = Math.max(80, job.progress || 0);
+    }
+
     // إذا merge step جاهز (pending + ready_for_merge) → ابدأ الدمج
     const mergeReady = mergeStep?.status === "pending" && (mergeStep?.output_data as any)?.ready_for_merge;
     if (mergeReady && job.status === "processing") {
@@ -161,7 +187,7 @@ serve(async (req) => {
       }
     }
 
-    if (job.status === "processing" && providerJobId && !job.output_url) {
+    if ((job.status === "processing" || autoStoppedByWatcher) && providerJobId && !job.output_url) {
       logInfo(`مراقبة عملية الدمج للمهمة ${jobId} (معرف المزود: ${providerJobId})`);
 
       // Track consecutive failures
