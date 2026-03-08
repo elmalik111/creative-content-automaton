@@ -446,7 +446,7 @@ async function processMediaMerge(
     })();
 
     // Call HuggingFace Space for merge
-    let result: { status: string; output_url?: string; error?: string };
+    let result: { status: string; output_url?: string; error?: string; diagnostics?: Record<string, unknown> };
     
     try {
       result = await mergeMediaWithFFmpeg({
