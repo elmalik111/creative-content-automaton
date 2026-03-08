@@ -4,8 +4,54 @@ import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
 const MAX_CONSECUTIVE_FAILURES = 20;
+const MERGE_TIMEOUT_MS = 10 * 60 * 1000;
+const PROVIDER_VIDEO_EXTENSIONS = [".mp4", ".mov", ".webm", ".mkv", ".avi"];
 
-// ===== LOGGING =====
+function getMergeStartedAt(mergeStep: any, mergeOutput: any): string | undefined {
+  return (
+    mergeStep?.started_at ||
+    mergeOutput?.started_at ||
+    mergeOutput?.merge_started_at ||
+    mergeOutput?.diagnostics?.started_at
+  );
+}
+
+async function findProviderOutputInStorage(providerJobId: string): Promise<string | undefined> {
+  try {
+    const { data, error } = await supabase.storage
+      .from("videos")
+      .list("public", { limit: 100, search: providerJobId });
+
+    if (error) {
+      logWarning(`تعذر فحص bucket videos للوظيفة ${providerJobId}`, error.message);
+      return undefined;
+    }
+
+    const candidates = (data || [])
+      .filter((item: any) => {
+        const name = String(item?.name || "").toLowerCase();
+        return (
+          name.includes(providerJobId.toLowerCase()) &&
+          PROVIDER_VIDEO_EXTENSIONS.some((ext) => name.endsWith(ext))
+        );
+      })
+      .sort((a: any, b: any) => {
+        const aTime = new Date(a?.updated_at || a?.created_at || 0).getTime();
+        const bTime = new Date(b?.updated_at || b?.created_at || 0).getTime();
+        return bTime - aTime;
+      });
+
+    if (!candidates.length) return undefined;
+
+    const providerPath = `public/${candidates[0].name}`;
+    const { data: publicUrlData } = supabase.storage.from("videos").getPublicUrl(providerPath);
+    return publicUrlData.publicUrl;
+  } catch (error) {
+    logWarning(`فشل fallback فحص ملف المزود ${providerJobId}`, error);
+    return undefined;
+  }
+}
+
 function logInfo(message: string, data?: any) {
   console.log(`[JOB-STATUS] ${message}`, data ? JSON.stringify(data, null, 2) : '');
 }
