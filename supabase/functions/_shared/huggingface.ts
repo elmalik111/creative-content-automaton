@@ -560,12 +560,14 @@ export async function startMergeWithFFmpeg(
     diagnostics: {
       healthCheck,
       spaceWokenUp,
-      attempts: 1,
+      attempts: Math.max(1, attemptErrors.length + 1),
       endpoint,
+      payload_variant: selectedVariant,
       requested_image_count: imageCount,
       requested_video_count: videoCount,
       provider_reported_image_count:
         rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
+      prior_attempt_errors: attemptErrors.length ? attemptErrors : undefined,
     },
   };
   const providerImageCount = Number(
