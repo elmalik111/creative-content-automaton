@@ -677,12 +677,19 @@ export async function checkMergeStatus(
   candidates.push(
     { method: "GET", url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/merge-status/${jobId}`, name: "GET /merge-status/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/result/${jobId}`, name: "GET /result/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/results/${jobId}`, name: "GET /results/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}`, name: "GET /status?jobId" },
     { method: "GET", url: `${HF_SPACE_URL}/status?job_id=${encodeURIComponent(jobId)}`, name: "GET /status?job_id" },
+    { method: "GET", url: `${HF_SPACE_URL}/result?jobId=${encodeURIComponent(jobId)}`, name: "GET /result?jobId" },
+    { method: "GET", url: `${HF_SPACE_URL}/result?job_id=${encodeURIComponent(jobId)}`, name: "GET /result?job_id" },
     { method: "POST", url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status {jobId}" },
     { method: "POST", url: `${HF_SPACE_URL}/status`, body: { job_id: jobId }, name: "POST /status {job_id}" },
     { method: "POST", url: `${HF_SPACE_URL}/job-status`, body: { jobId }, name: "POST /job-status {jobId}" },
-    { method: "POST", url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" }
+    { method: "POST", url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" },
+    { method: "POST", url: `${HF_SPACE_URL}/result`, body: { jobId }, name: "POST /result {jobId}" },
+    { method: "POST", url: `${HF_SPACE_URL}/result`, body: { job_id: jobId }, name: "POST /result {job_id}" }
   );
 
   const errors: string[] = [];
