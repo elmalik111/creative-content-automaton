@@ -6,6 +6,28 @@ import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.t
 const MAX_CONSECUTIVE_FAILURES = 20;
 const MERGE_TIMEOUT_MS = 10 * 60 * 1000;
 const PROVIDER_VIDEO_EXTENSIONS = [".mp4", ".mov", ".webm", ".mkv", ".avi"];
+const STORAGE_SIZE_ERROR_TOKENS = [
+  "exceeded the maximum allowed size",
+  "payload too large",
+  "entity too large",
+  "request entity too large",
+  "file too large",
+  "too large",
+];
+
+function isStorageSizeError(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : typeof (error as any)?.message === "string"
+          ? String((error as any).message)
+          : "";
+
+  const lower = message.toLowerCase();
+  return STORAGE_SIZE_ERROR_TOKENS.some((token) => lower.includes(token));
+}
 
 function getMergeStartedAt(mergeStep: any, mergeOutput: any): string | undefined {
   return (
