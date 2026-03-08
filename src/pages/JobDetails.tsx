@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useJobDetails } from '@/hooks/useJobDetails';
 import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
@@ -26,9 +26,72 @@ import {
   Send,
   RotateCcw,
   StopCircle,
-  Ban
+  Ban,
+  AlertTriangle,
+  Timer
 } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
+
+// SLA limits per step in seconds
+const STEP_SLA: Record<string, number> = {
+  validate_inputs: 30,
+  script_generation: 60,
+  voice_generation: 120,
+  image_generation: 300,
+  media_merge: 600,
+  merge: 600,
+  publishing: 120,
+  upload: 120,
+  finalize: 60,
+};
+
+function useElapsedSeconds(startedAt: string | null, isActive: boolean) {
+  const [elapsed, setElapsed] = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isActive || !startedAt) {
+      setElapsed(0);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      return;
+    }
+    const start = new Date(startedAt).getTime();
+    const tick = () => setElapsed(Math.floor((Date.now() - start) / 1000));
+    tick();
+    intervalRef.current = setInterval(tick, 1000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [startedAt, isActive]);
+
+  return elapsed;
+}
+
+function formatElapsed(secs: number) {
+  if (secs < 60) return `${secs}ث`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s > 0 ? `${m}د ${s}ث` : `${m}د`;
+}
+
+function StepTimer({ startedAt, stepName, status }: { startedAt: string | null; stepName: string; status: string }) {
+  const isActive = status === 'processing';
+  const elapsed = useElapsedSeconds(startedAt, isActive);
+  const sla = STEP_SLA[stepName];
+  const isOverSLA = sla !== undefined && elapsed > sla;
+
+  if (!isActive || !startedAt) return null;
+
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full border ${
+      isOverSLA
+        ? 'text-destructive border-destructive/30 bg-destructive/10 animate-pulse'
+        : 'text-blue-600 border-blue-500/20 bg-blue-500/10'
+    }`}>
+      {isOverSLA ? <AlertTriangle className="h-3 w-3" /> : <Timer className="h-3 w-3" />}
+      {formatElapsed(elapsed)}
+      {isOverSLA && sla && <span className="opacity-70">/ {formatElapsed(sla)}</span>}
+    </span>
+  );
+}
 
 const stepIcons: Record<string, React.ElementType> = {
   'validate_inputs': FileVideo,
@@ -465,12 +528,22 @@ export default function JobDetails() {
                 <div className="absolute right-[22px] top-0 bottom-0 w-0.5 bg-border" />
                 
                 <div className="space-y-6">
-                  {job.steps.map((step, index) => {
+                  {job.steps.map((step) => {
                     const StepIcon = stepIcons[step.step_name] || FileVideo;
                     const label = stepLabels[step.step_name] || step.step_name;
                     const isFailedMerge =
                       (step.step_name === 'merge' || step.step_name === 'media_merge') &&
                       step.status === 'failed';
+
+                    const sla = STEP_SLA[step.step_name];
+                    const completedDuration =
+                      step.started_at && step.completed_at
+                        ? Math.floor(
+                            (new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000
+                          )
+                        : null;
+                    const isCompletedOverSLA =
+                      completedDuration !== null && sla !== undefined && completedDuration > sla;
                     
                     return (
                       <div key={step.id} className="relative flex gap-4">
@@ -485,6 +558,24 @@ export default function JobDetails() {
                             <div className="flex items-center gap-2">
                               <StepIcon className="h-4 w-4 text-muted-foreground" />
                               <span className="font-medium">{label}</span>
+                              {/* Live timer for active steps */}
+                              <StepTimer
+                                startedAt={step.started_at}
+                                stepName={step.step_name}
+                                status={step.status}
+                              />
+                              {/* Completed duration badge */}
+                              {completedDuration !== null && (
+                                <span className={`inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full border ${
+                                  isCompletedOverSLA
+                                    ? 'text-amber-600 border-amber-500/30 bg-amber-500/10'
+                                    : 'text-muted-foreground border-border bg-muted/40'
+                                }`}>
+                                  <Timer className="h-3 w-3" />
+                                  {formatElapsed(completedDuration)}
+                                  {isCompletedOverSLA && <AlertTriangle className="h-3 w-3 text-amber-500" />}
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-2">
                               {isFailedMerge && canRetryMerge && (
@@ -511,6 +602,14 @@ export default function JobDetails() {
                               <p>اكتمل: {format(new Date(step.completed_at), 'PPp')}</p>
                             )}
                           </div>
+
+                          {/* SLA warning for completed step that took too long */}
+                          {isCompletedOverSLA && sla && (
+                            <div className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-600 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                              <AlertTriangle className="h-3 w-3 shrink-0" />
+                              استغرقت هذه الخطوة {formatElapsed(completedDuration!)} وهو أبطأ من المتوقع ({formatElapsed(sla)})
+                            </div>
+                          )}
                           
                           {step.error_message && (
                             <div className="mt-2 p-2 rounded bg-destructive/10 text-destructive text-xs">
