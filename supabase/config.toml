@@ -26,3 +26,6 @@ verify_jwt = false
 
 [functions.publish-video]
 verify_jwt = false
+
+[functions.retry-merge]
+verify_jwt = false
