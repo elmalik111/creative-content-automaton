@@ -568,6 +568,8 @@ export async function startMergeWithFFmpeg(
     );
   }
   logInfo("✓ تم استلام استجابة صالحة", rawResult);
+  const providerStatusEndpoint = extractStatusEndpoint(rawResult);
+
   const result: MergeMediaResponse = {
     status: rawResult.status || "processing",
     progress: rawResult.progress ?? 0,
@@ -583,6 +585,7 @@ export async function startMergeWithFFmpeg(
       payload_variant: selectedVariant,
       requested_image_count: imageCount,
       requested_video_count: videoCount,
+      provider_status_endpoint: providerStatusEndpoint,
       provider_reported_image_count:
         rawResult?.image_count ?? rawResult?.images_count ?? rawResult?.received_images ?? undefined,
       prior_attempt_errors: attemptErrors.length ? attemptErrors : undefined,
