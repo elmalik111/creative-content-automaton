@@ -313,6 +313,7 @@ serve(async (req) => {
                   ...(mergeOutput || {}),
                   provider: "ffmpeg-space",
                   provider_job_id: providerJobId,
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_output_url: providerOutputUrl,
                   output_url: finalUrl,
                   stage: "persisted",
