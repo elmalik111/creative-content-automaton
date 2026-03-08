@@ -225,6 +225,7 @@ serve(async (req) => {
                   ...(mergeOutput || {}),
                   provider: "ffmpeg-space",
                   provider_job_id: providerJobId,
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_progress: providerStatus.progress,
                   provider_status: providerStatus.status,
                   stage: "processing",
@@ -251,6 +252,7 @@ serve(async (req) => {
                 completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_error: msg,
                   failed_at: new Date().toISOString(),
                 }
