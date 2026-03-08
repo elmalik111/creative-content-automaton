@@ -121,8 +121,14 @@ serve(async (req) => {
     const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
+    const mergeDiagnostics = (mergeOutput?.diagnostics || {}) as any;
     const providerJobId: string | undefined =
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
+    const providerStatusEndpoint: string | undefined =
+      mergeOutput?.provider_status_endpoint ||
+      mergeOutput?.status_url ||
+      mergeDiagnostics?.provider_status_endpoint ||
+      mergeDiagnostics?.status_url;
 
     const autoStoppedByWatcher =
       job.status === "failed" &&
@@ -194,7 +200,9 @@ serve(async (req) => {
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
 
       try {
-        const providerStatus = await checkMergeStatus(providerJobId);
+        const providerStatus = await checkMergeStatus(providerJobId, {
+          statusEndpoint: providerStatusEndpoint,
+        });
         logInfo(`حالة المزود [${providerJobId}]:`, providerStatus);
 
         // Success – reset failure counter

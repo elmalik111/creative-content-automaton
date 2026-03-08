@@ -40,6 +40,24 @@ function extractOutputUrl(raw: any): string | undefined {
     raw?.data?.url;
   return normalizeMaybeUrl(v);
 }
+function extractStatusEndpoint(raw: any): string | undefined {
+  const v =
+    raw?.status_url ??
+    raw?.statusUrl ??
+    raw?.status_endpoint ??
+    raw?.statusEndpoint ??
+    raw?.check_url ??
+    raw?.checkUrl ??
+    raw?.result?.status_url ??
+    raw?.result?.statusUrl ??
+    raw?.result?.status_endpoint ??
+    raw?.result?.statusEndpoint ??
+    raw?.data?.status_url ??
+    raw?.data?.statusUrl ??
+    raw?.data?.status_endpoint ??
+    raw?.data?.statusEndpoint;
+  return normalizeMaybeUrl(v);
+}
 // ===== ERROR DETECTION =====
 function isHtmlErrorResponse(text: string): boolean {
   const trimmed = text.trim();

@@ -310,18 +310,32 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
       } 
       // السيرفر يعالج - job-status سيتابع
       else if (mergeResult.job_id) {
+        const mergeDiagnostics = (mergeResult.diagnostics ?? {}) as Record<string, unknown>;
+        const providerReportedImageCount = Number(mergeDiagnostics.provider_reported_image_count ?? NaN);
+
         await updateStep(steps.mergeStep, "processing", undefined, {
           provider_job_id: mergeResult.job_id,
           provider: "ffmpeg-space",
           started_at: new Date().toISOString(),
           requested_image_count: imageUrls.length,
+          provider_reported_image_count: Number.isFinite(providerReportedImageCount)
+            ? providerReportedImageCount
+            : undefined,
+          payload_variant:
+            typeof mergeDiagnostics.payload_variant === "string"
+              ? mergeDiagnostics.payload_variant
+              : undefined,
+          provider_status_endpoint:
+            typeof mergeDiagnostics.provider_status_endpoint === "string"
+              ? mergeDiagnostics.provider_status_endpoint
+              : undefined,
           image_urls: imageUrls,
           audio_url: audioUrlData.publicUrl,
-          diagnostics: mergeResult.diagnostics ?? null,
+          diagnostics: mergeDiagnostics,
         });
         await updateProgress(jobId, 80);
         log('INFO', `✅ الدمج قيد المعالجة: ${mergeResult.job_id}`);
-      } 
+      }
       // خطأ
       else if (mergeResult.status === "failed") {
         throw new Error(mergeResult.error || "فشل الدمج");
