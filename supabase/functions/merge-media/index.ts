@@ -446,7 +446,7 @@ async function processMediaMerge(
     })();
 
     // Call HuggingFace Space for merge
-    let result: { status: string; output_url?: string; error?: string };
+    let result: { status: string; output_url?: string; error?: string; diagnostics?: Record<string, unknown> };
     
     try {
       result = await mergeMediaWithFFmpeg({
@@ -533,6 +533,9 @@ async function processMediaMerge(
           duration_seconds: Math.round(mergeDuration / 1000),
           provider_output_url: providerOutputUrl,
           output_url: finalOutputUrl,
+          requested_image_count: Number((result.diagnostics as any)?.requested_image_count ?? request.images?.length ?? 0),
+          provider_reported_image_count: Number((result.diagnostics as any)?.provider_reported_image_count ?? NaN),
+          diagnostics: result.diagnostics ?? null,
         },
       });
     }

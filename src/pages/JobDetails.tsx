@@ -4,6 +4,7 @@ import { DashboardLayout } from '@/layouts/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ProgressBar } from '@/components/dashboard/ProgressBar';
 import { 
@@ -136,6 +137,45 @@ export default function JobDetails() {
     );
   }
 
+  const asRecord = (value: unknown): Record<string, unknown> =>
+    value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+  const toNumber = (...values: unknown[]): number | undefined => {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string' && value.trim()) {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const imageStep = job.steps.find((step) => step.step_name === 'image_generation');
+  const mergeStep = job.steps.find((step) => step.step_name === 'merge' || step.step_name === 'media_merge');
+  const imageOutput = asRecord(imageStep?.output_data);
+  const mergeOutput = asRecord(mergeStep?.output_data);
+  const mergeDiagnostics = asRecord(mergeOutput.diagnostics);
+
+  const sentImageCount = toNumber(
+    mergeOutput.requested_image_count,
+    imageOutput.total_succeeded,
+    Array.isArray(imageOutput.image_urls) ? imageOutput.image_urls.length : undefined
+  );
+
+  const providerImageCount = toNumber(
+    mergeOutput.provider_reported_image_count,
+    mergeDiagnostics.provider_reported_image_count,
+    mergeDiagnostics.received_images,
+    mergeOutput.image_count
+  );
+
+  const hasImageCounter = sentImageCount !== undefined || providerImageCount !== undefined;
+  const hasImageMismatch =
+    sentImageCount !== undefined &&
+    providerImageCount !== undefined &&
+    sentImageCount !== providerImageCount;
+
   return (
     <DashboardLayout>
       <div className="max-w-4xl mx-auto space-y-6">
@@ -188,6 +228,37 @@ export default function JobDetails() {
               </div>
               <ProgressBar progress={job.progress} />
             </div>
+
+            {hasImageCounter && (
+              <div className="p-3 rounded-lg border bg-muted/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">عداد صور الدمج</p>
+                  <Badge variant={hasImageMismatch ? 'destructive' : 'outline'}>
+                    {hasImageMismatch ? 'عدم تطابق' : 'متطابق'}
+                  </Badge>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                  <div className="rounded-md bg-background/70 border px-3 py-2">
+                    <p className="text-xs text-muted-foreground mb-1">الصور المرسلة للدمج</p>
+                    <p className="font-semibold">{sentImageCount ?? 'غير متاح'}</p>
+                  </div>
+                  <div className="rounded-md bg-background/70 border px-3 py-2">
+                    <p className="text-xs text-muted-foreground mb-1">الصور المؤكدة من المزود</p>
+                    <p className="font-semibold">{providerImageCount ?? 'غير متاح'}</p>
+                  </div>
+                </div>
+
+                {hasImageMismatch && (
+                  <Alert variant="destructive">
+                    <AlertTitle>تنبيه فوري: عدم تطابق في الصور</AlertTitle>
+                    <AlertDescription>
+                      تم إرسال {sentImageCount} صورة للدمج بينما المزود أكد {providerImageCount} فقط، وقد يسبب ذلك فيديو بعدد صور أقل من المتوقع.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
 
             {/* Error Message */}
             {job.error_message && (
