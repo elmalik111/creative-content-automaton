@@ -4,8 +4,54 @@ import { supabase, corsHeaders } from "../_shared/supabase.ts";
 import { checkMergeStatus, isFFmpegSpaceHealthy } from "../_shared/huggingface.ts";
 
 const MAX_CONSECUTIVE_FAILURES = 20;
+const MERGE_TIMEOUT_MS = 10 * 60 * 1000;
+const PROVIDER_VIDEO_EXTENSIONS = [".mp4", ".mov", ".webm", ".mkv", ".avi"];
 
-// ===== LOGGING =====
+function getMergeStartedAt(mergeStep: any, mergeOutput: any): string | undefined {
+  return (
+    mergeStep?.started_at ||
+    mergeOutput?.started_at ||
+    mergeOutput?.merge_started_at ||
+    mergeOutput?.diagnostics?.started_at
+  );
+}
+
+async function findProviderOutputInStorage(providerJobId: string): Promise<string | undefined> {
+  try {
+    const { data, error } = await supabase.storage
+      .from("videos")
+      .list("public", { limit: 100, search: providerJobId });
+
+    if (error) {
+      logWarning(`تعذر فحص bucket videos للوظيفة ${providerJobId}`, error.message);
+      return undefined;
+    }
+
+    const candidates = (data || [])
+      .filter((item: any) => {
+        const name = String(item?.name || "").toLowerCase();
+        return (
+          name.includes(providerJobId.toLowerCase()) &&
+          PROVIDER_VIDEO_EXTENSIONS.some((ext) => name.endsWith(ext))
+        );
+      })
+      .sort((a: any, b: any) => {
+        const aTime = new Date(a?.updated_at || a?.created_at || 0).getTime();
+        const bTime = new Date(b?.updated_at || b?.created_at || 0).getTime();
+        return bTime - aTime;
+      });
+
+    if (!candidates.length) return undefined;
+
+    const providerPath = `public/${candidates[0].name}`;
+    const { data: publicUrlData } = supabase.storage.from("videos").getPublicUrl(providerPath);
+    return publicUrlData.publicUrl;
+  } catch (error) {
+    logWarning(`فشل fallback فحص ملف المزود ${providerJobId}`, error);
+    return undefined;
+  }
+}
+
 function logInfo(message: string, data?: any) {
   console.log(`[JOB-STATUS] ${message}`, data ? JSON.stringify(data, null, 2) : '');
 }
@@ -198,45 +244,102 @@ serve(async (req) => {
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
+      const mergeStartedAt = getMergeStartedAt(mergeStep, mergeOutput);
+      const mergeElapsedMs = mergeStartedAt
+        ? Date.now() - new Date(mergeStartedAt).getTime()
+        : 0;
+      const mergeTimedOut = mergeElapsedMs > MERGE_TIMEOUT_MS;
+      const statusEndpointsMissing = Boolean(mergeOutput?.status_endpoints_missing);
 
       try {
-        const providerStatus = await checkMergeStatus(providerJobId, {
-          statusEndpoint: providerStatusEndpoint,
-        });
+        let providerStatus;
+
+        if (statusEndpointsMissing) {
+          const storageOutput = await findProviderOutputInStorage(providerJobId);
+          providerStatus = storageOutput
+            ? {
+                status: "completed",
+                output_url: storageOutput,
+                job_id: providerJobId,
+                message: "Recovered via storage fallback",
+              }
+            : {
+                status: "processing",
+                progress: Math.max(Number(mergeOutput?.provider_progress || 80), 80),
+                job_id: providerJobId,
+                message: "Waiting for provider artifact in storage",
+              };
+        } else {
+          providerStatus = await checkMergeStatus(providerJobId, {
+            statusEndpoint: providerStatusEndpoint,
+          });
+        }
+
         logInfo(`حالة المزود [${providerJobId}]:`, providerStatus);
 
         // Success – reset failure counter
         if (providerStatus.status === "processing") {
-          const mapped = Math.min(
-            89,
-            Math.max(
-              job.progress || 75,
-              75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
-            )
-          );
+          if (statusEndpointsMissing && mergeTimedOut) {
+            const timeoutMsg =
+              `انتهت مهلة الدمج (${Math.round(MERGE_TIMEOUT_MS / 60000)} دقائق) بدون status endpoint وبدون ملف ناتج.` +
+              `\nمعرف مهمة المزود: ${providerJobId}`;
 
-          await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "failed",
+                  error_message: timeoutMsg,
+                  completed_at: new Date().toISOString(),
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider_status_endpoint: providerStatusEndpoint,
+                    status_endpoints_missing: true,
+                    timeout_reached: true,
+                    final_error: timeoutMsg,
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
 
-          if (mergeStep?.id) {
             await supabase
-              .from("job_steps")
-              .update({
-                output_data: {
-                  ...(mergeOutput || {}),
-                  provider: "ffmpeg-space",
-                  provider_job_id: providerJobId,
-                  provider_status_endpoint: providerStatusEndpoint,
-                  provider_progress: providerStatus.progress,
-                  provider_status: providerStatus.status,
-                  stage: "processing",
-                  consecutive_failures: 0, // Reset on successful check
-                  last_check: new Date().toISOString(),
-                },
-              })
-              .eq("id", mergeStep.id);
-          }
+              .from("jobs")
+              .update({ status: "failed", error_message: timeoutMsg })
+              .eq("id", jobId);
+          } else {
+            const mapped = Math.min(
+              89,
+              Math.max(
+                job.progress || 75,
+                75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
+              )
+            );
 
-          logInfo(`✓ تحديث التقدم: ${mapped}%`);
+            await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
+
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider: "ffmpeg-space",
+                    provider_job_id: providerJobId,
+                    provider_status_endpoint: providerStatusEndpoint,
+                    provider_progress: providerStatus.progress,
+                    provider_status: providerStatus.status,
+                    stage: "processing",
+                    status_endpoints_missing: statusEndpointsMissing,
+                    consecutive_failures: 0,
+                    waiting_for_artifact: statusEndpointsMissing,
+                    last_check: new Date().toISOString(),
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
+
+            logInfo(`✓ تحديث التقدم: ${mapped}%`);
+          }
         }
 
         if (providerStatus.status === "failed") {
@@ -434,81 +537,153 @@ serve(async (req) => {
         const newFailures = currentFailures + 1;
         const notFoundCount = (errorMsg.match(/HTTP 404/g) || []).length;
         const allStatusEndpointsMissing = notFoundCount >= 6;
-        const effectiveFailures = allStatusEndpointsMissing ? MAX_CONSECUTIVE_FAILURES : newFailures;
 
-        logWarning(
-          `فشل مراقبة الدمج ${effectiveFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`,
-          errorMsg
-        );
-
-        // Check if it's a server health issue
-        let serverHealthInfo = "";
-        try {
-          const healthCheck = await isFFmpegSpaceHealthy();
-          if (!healthCheck.healthy) {
-            serverHealthInfo = `\nحالة السيرفر: ${healthCheck.error || 'غير صحي'}`;
-            if (healthCheck.isSleeping) {
-              serverHealthInfo += "\n⚠️ السيرفر في وضع السكون - قد يحتاج إلى إعادة تشغيل";
-            }
-          }
-        } catch (healthError) {
-          logWarning('فشل فحص صحة السيرفر', healthError);
-        }
-
-        if (mergeStep?.id) {
-          await supabase
-            .from("job_steps")
-            .update({
-              output_data: {
-                ...(mergeOutput || {}),
-                provider_status_endpoint: providerStatusEndpoint,
-                consecutive_failures: effectiveFailures,
-                status_endpoints_missing: allStatusEndpointsMissing,
-                last_error: errorMsg,
-                last_error_time: new Date().toISOString(),
-                server_health_checked: !!serverHealthInfo,
-              },
-            })
-            .eq("id", mergeStep.id);
-        }
-
-        // If too many consecutive failures, fail the job with detailed error
-        if (effectiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg = allStatusEndpointsMissing
-            ? `تعذّر مراقبة مهمة الدمج لأن جميع مسارات الحالة أعادت 404.\n` +
-              `معرف مهمة المزود: ${providerJobId}\n` +
-              `نقطة الحالة الحالية: ${providerStatusEndpoint || 'غير متاحة'}\n` +
-              `الإجراء المقترح: أعد المحاولة مع مزود يدعم status endpoint أو تأكد من endpoint الصحيح.`
-            : `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
-              `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
-              `معرف مهمة المزود: ${providerJobId}\n` +
-              `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
-
-          logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
+        if (allStatusEndpointsMissing) {
+          const storageOutput = await findProviderOutputInStorage(providerJobId);
 
           if (mergeStep?.id) {
             await supabase
               .from("job_steps")
               .update({
-                status: "failed",
-                error_message: failMsg,
-                completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
                   provider_status_endpoint: providerStatusEndpoint,
-                  consecutive_failures: effectiveFailures,
-                  status_endpoints_missing: allStatusEndpointsMissing,
-                  max_failures_reached: true,
-                  final_error: failMsg,
+                  consecutive_failures: 0,
+                  status_endpoints_missing: true,
+                  waiting_for_artifact: !storageOutput,
+                  recovered_provider_output_url: storageOutput,
+                  last_error: errorMsg,
+                  last_error_time: new Date().toISOString(),
                 },
               })
               .eq("id", mergeStep.id);
           }
 
-          await supabase
-            .from("jobs")
-            .update({ status: "failed", error_message: failMsg })
-            .eq("id", jobId);
+          if (storageOutput) {
+            logInfo(`✅ تم العثور على ملف المزود مباشرةً بدون status endpoint`, {
+              jobId,
+              providerJobId,
+              storageOutput,
+            });
+          }
+
+          if (mergeTimedOut && !storageOutput) {
+            const failMsg =
+              `انتهت مهلة الدمج (${Math.round(MERGE_TIMEOUT_MS / 60000)} دقائق) بدون status endpoint وبدون ملف ناتج.` +
+              `\nمعرف مهمة المزود: ${providerJobId}`;
+
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "failed",
+                  error_message: failMsg,
+                  completed_at: new Date().toISOString(),
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider_status_endpoint: providerStatusEndpoint,
+                    status_endpoints_missing: true,
+                    timeout_reached: true,
+                    max_failures_reached: false,
+                    final_error: failMsg,
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
+
+            await supabase
+              .from("jobs")
+              .update({ status: "failed", error_message: failMsg })
+              .eq("id", jobId);
+
+            logError(`تجاوز مهلة الدمج بدون endpoint`, failMsg);
+          } else {
+            await supabase
+              .from("jobs")
+              .update({
+                status: "processing",
+                progress: Math.max(88, job.progress || 80),
+                error_message: null,
+              })
+              .eq("id", jobId);
+
+            logWarning(
+              `مسارات الحالة غير متاحة للمهمة ${jobId} — تم التحويل إلى fallback فحص Storage`,
+              { providerJobId, mergeTimedOut }
+            );
+          }
+        } else {
+          const effectiveFailures = newFailures;
+
+          logWarning(
+            `فشل مراقبة الدمج ${effectiveFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`,
+            errorMsg
+          );
+
+          // Check if it's a server health issue
+          let serverHealthInfo = "";
+          try {
+            const healthCheck = await isFFmpegSpaceHealthy();
+            if (!healthCheck.healthy) {
+              serverHealthInfo = `\nحالة السيرفر: ${healthCheck.error || 'غير صحي'}`;
+              if (healthCheck.isSleeping) {
+                serverHealthInfo += "\n⚠️ السيرفر في وضع السكون - قد يحتاج إلى إعادة تشغيل";
+              }
+            }
+          } catch (healthError) {
+            logWarning('فشل فحص صحة السيرفر', healthError);
+          }
+
+          if (mergeStep?.id) {
+            await supabase
+              .from("job_steps")
+              .update({
+                output_data: {
+                  ...(mergeOutput || {}),
+                  provider_status_endpoint: providerStatusEndpoint,
+                  consecutive_failures: effectiveFailures,
+                  status_endpoints_missing: false,
+                  last_error: errorMsg,
+                  last_error_time: new Date().toISOString(),
+                  server_health_checked: !!serverHealthInfo,
+                },
+              })
+              .eq("id", mergeStep.id);
+          }
+
+          if (effectiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            const failMsg =
+              `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
+              `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
+              `معرف مهمة المزود: ${providerJobId}\n` +
+              `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
+
+            logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
+
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "failed",
+                  error_message: failMsg,
+                  completed_at: new Date().toISOString(),
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider_status_endpoint: providerStatusEndpoint,
+                    consecutive_failures: effectiveFailures,
+                    status_endpoints_missing: false,
+                    max_failures_reached: true,
+                    final_error: failMsg,
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
+
+            await supabase
+              .from("jobs")
+              .update({ status: "failed", error_message: failMsg })
+              .eq("id", jobId);
+          }
         }
       }
 
