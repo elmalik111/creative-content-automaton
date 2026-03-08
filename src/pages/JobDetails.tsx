@@ -229,6 +229,37 @@ export default function JobDetails() {
               <ProgressBar progress={job.progress} />
             </div>
 
+            {hasImageCounter && (
+              <div className="p-3 rounded-lg border bg-muted/30 space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-medium">عداد صور الدمج</p>
+                  <Badge variant={hasImageMismatch ? 'destructive' : 'outline'}>
+                    {hasImageMismatch ? 'عدم تطابق' : 'متطابق'}
+                  </Badge>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                  <div className="rounded-md bg-background/70 border px-3 py-2">
+                    <p className="text-xs text-muted-foreground mb-1">الصور المرسلة للدمج</p>
+                    <p className="font-semibold">{sentImageCount ?? 'غير متاح'}</p>
+                  </div>
+                  <div className="rounded-md bg-background/70 border px-3 py-2">
+                    <p className="text-xs text-muted-foreground mb-1">الصور المؤكدة من المزود</p>
+                    <p className="font-semibold">{providerImageCount ?? 'غير متاح'}</p>
+                  </div>
+                </div>
+
+                {hasImageMismatch && (
+                  <Alert variant="destructive">
+                    <AlertTitle>تنبيه فوري: عدم تطابق في الصور</AlertTitle>
+                    <AlertDescription>
+                      تم إرسال {sentImageCount} صورة للدمج بينما المزود أكد {providerImageCount} فقط، وقد يسبب ذلك فيديو بعدد صور أقل من المتوقع.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            )}
+
             {/* Error Message */}
             {job.error_message && (
               <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
