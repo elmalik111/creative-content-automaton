@@ -284,21 +284,23 @@ serve(async (req) => {
               `انتهت مهلة الدمج (${Math.round(MERGE_TIMEOUT_MS / 60000)} دقائق) بدون status endpoint وبدون ملف ناتج.` +
               `\nمعرف مهمة المزود: ${providerJobId}`;
 
-            await supabase
-              .from("job_steps")
-              .update({
-                status: "failed",
-                error_message: timeoutMsg,
-                completed_at: new Date().toISOString(),
-                output_data: {
-                  ...(mergeOutput || {}),
-                  provider_status_endpoint: providerStatusEndpoint,
-                  status_endpoints_missing: true,
-                  timeout_reached: true,
-                  final_error: timeoutMsg,
-                },
-              })
-              .eq("id", mergeStep?.id);
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "failed",
+                  error_message: timeoutMsg,
+                  completed_at: new Date().toISOString(),
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider_status_endpoint: providerStatusEndpoint,
+                    status_endpoints_missing: true,
+                    timeout_reached: true,
+                    final_error: timeoutMsg,
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
 
             await supabase
               .from("jobs")
