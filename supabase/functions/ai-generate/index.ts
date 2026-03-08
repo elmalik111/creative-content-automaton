@@ -313,7 +313,11 @@ async function processJob(jobId: string, inputData: JobInputData, steps: StepIds
         await updateStep(steps.mergeStep, "processing", undefined, {
           provider_job_id: mergeResult.job_id,
           provider: "ffmpeg-space",
-          started_at: new Date().toISOString()
+          started_at: new Date().toISOString(),
+          requested_image_count: imageUrls.length,
+          image_urls: imageUrls,
+          audio_url: audioUrlData.publicUrl,
+          diagnostics: mergeResult.diagnostics ?? null,
         });
         await updateProgress(jobId, 80);
         log('INFO', `✅ الدمج قيد المعالجة: ${mergeResult.job_id}`);
