@@ -613,19 +613,77 @@ function normalizeProviderStatus(rawStatus: unknown): MergeMediaResponse["status
   return "processing";
 }
 
-export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
+function resolveProviderStatusEndpoint(statusEndpoint: string, jobId: string): string {
+  const endpoint = statusEndpoint.trim();
+  if (!endpoint) return endpoint;
+
+  const encodedJobId = encodeURIComponent(jobId);
+  const withPathJobId = endpoint
+    .replaceAll("{job_id}", encodedJobId)
+    .replaceAll("{jobId}", encodedJobId)
+    .replaceAll(":job_id", encodedJobId)
+    .replaceAll(":jobId", encodedJobId)
+    .replaceAll(":id", encodedJobId);
+
+  try {
+    const url = new URL(withPathJobId, HF_SPACE_URL);
+    const hasPathJobId = url.pathname.includes(jobId) || url.pathname.includes(encodedJobId);
+    const hasQueryJobId = url.searchParams.has("job_id") || url.searchParams.has("jobId");
+
+    if (!hasPathJobId && !hasQueryJobId) {
+      url.searchParams.set("job_id", jobId);
+    }
+
+    return url.toString();
+  } catch {
+    return withPathJobId;
+  }
+}
+
+export async function checkMergeStatus(
+  jobId: string,
+  options?: { statusEndpoint?: string }
+): Promise<MergeMediaResponse> {
   logInfo(`فحص حالة المهمة: ${jobId}`);
 
-  const candidates = [
-    { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}`, name: "GET /status?jobId" },
-    { method: "GET" as const, url: `${HF_SPACE_URL}/status?job_id=${encodeURIComponent(jobId)}`, name: "GET /status?job_id" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status {jobId}" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { job_id: jobId }, name: "POST /status {job_id}" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { jobId }, name: "POST /job-status {jobId}" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" },
-  ];
+  const providerStatusEndpoint =
+    typeof options?.statusEndpoint === "string" && options.statusEndpoint.trim()
+      ? resolveProviderStatusEndpoint(options.statusEndpoint, jobId)
+      : undefined;
+
+  const candidates: Array<{
+    method: "GET" | "POST";
+    url: string;
+    body?: Record<string, unknown>;
+    name: string;
+  }> = [];
+
+  if (providerStatusEndpoint) {
+    candidates.push(
+      {
+        method: "GET",
+        url: providerStatusEndpoint,
+        name: "GET provider_status_endpoint",
+      },
+      {
+        method: "POST",
+        url: providerStatusEndpoint,
+        body: { job_id: jobId, jobId },
+        name: "POST provider_status_endpoint",
+      }
+    );
+  }
+
+  candidates.push(
+    { method: "GET", url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}`, name: "GET /status?jobId" },
+    { method: "GET", url: `${HF_SPACE_URL}/status?job_id=${encodeURIComponent(jobId)}`, name: "GET /status?job_id" },
+    { method: "POST", url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status {jobId}" },
+    { method: "POST", url: `${HF_SPACE_URL}/status`, body: { job_id: jobId }, name: "POST /status {job_id}" },
+    { method: "POST", url: `${HF_SPACE_URL}/job-status`, body: { jobId }, name: "POST /job-status {jobId}" },
+    { method: "POST", url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" }
+  );
 
   const errors: string[] = [];
 
