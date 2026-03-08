@@ -584,18 +584,35 @@ export async function startMergeWithFFmpeg(
   return result;
 }
 // ===== CHECK STATUS =====
+function normalizeProviderStatus(rawStatus: unknown): MergeMediaResponse["status"] {
+  const s = String(rawStatus || "").toLowerCase().trim();
+  if (!s) return "processing";
+  if (["completed", "complete", "done", "success", "succeeded", "finished"].includes(s)) return "completed";
+  if (["failed", "error", "cancelled", "canceled", "timeout"].includes(s)) return "failed";
+  return "processing";
+}
+
 export async function checkMergeStatus(jobId: string): Promise<MergeMediaResponse> {
   logInfo(`فحص حالة المهمة: ${jobId}`);
+
   const candidates = [
     { method: "GET" as const, url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
     { method: "GET" as const, url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
-    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status" },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status?jobId=${encodeURIComponent(jobId)}`, name: "GET /status?jobId" },
+    { method: "GET" as const, url: `${HF_SPACE_URL}/status?job_id=${encodeURIComponent(jobId)}`, name: "GET /status?job_id" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { jobId }, name: "POST /status {jobId}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/status`, body: { job_id: jobId }, name: "POST /status {job_id}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { jobId }, name: "POST /job-status {jobId}" },
+    { method: "POST" as const, url: `${HF_SPACE_URL}/job-status`, body: { job_id: jobId }, name: "POST /job-status {job_id}" },
   ];
+
   const errors: string[] = [];
+
   for (const c of candidates) {
     try {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 15000);
+
       const resp = await fetch(c.url, {
         method: c.method,
         headers: {
@@ -605,25 +622,25 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         body: c.method === "POST" ? JSON.stringify(c.body ?? {}) : undefined,
         signal: ctrl.signal,
       });
+
       clearTimeout(timer);
       const text = await resp.text();
+
       if (isHtmlErrorResponse(text)) {
         errors.push(`${c.name}: HTML error page (HTTP ${resp.status})`);
         continue;
       }
+
       if (resp.status === 404) {
-        return { 
-          status: "failed" as const, 
-          progress: 0, 
-          job_id: jobId,
-          error: "المهمة غير موجودة (قد يكون السيرفر أُعيد تشغيله)"
-        };
+        errors.push(`${c.name}: HTTP 404`);
+        continue;
       }
-      
+
       if (!resp.ok) {
         errors.push(`${c.name}: HTTP ${resp.status} - ${text.slice(0, 100)}`);
         continue;
       }
+
       let raw: any;
       try {
         raw = JSON.parse(text);
@@ -631,30 +648,38 @@ export async function checkMergeStatus(jobId: string): Promise<MergeMediaRespons
         errors.push(`${c.name}: Invalid JSON`);
         continue;
       }
-      logInfo(`✓ ${c.name} نجح`, raw);
+
+      const outputUrl = extractOutputUrl(raw);
+      const status = outputUrl
+        ? "completed"
+        : normalizeProviderStatus(
+            raw?.status ?? raw?.state ?? raw?.job_status ?? raw?.result?.status ?? raw?.data?.status
+          );
+
+      const rawProgress = Number(
+        raw?.progress ?? raw?.percentage ?? raw?.percent ?? raw?.result?.progress ?? raw?.data?.progress ?? 0
+      );
+      const progress = Number.isFinite(rawProgress) ? Math.max(0, Math.min(100, rawProgress)) : 0;
+
+      logInfo(`✓ ${c.name} نجح`, { status, progress, hasOutput: !!outputUrl });
+
       return {
-        status: raw.status || "processing",
-        progress: raw.progress ?? 0,
-        output_url: extractOutputUrl(raw),
-        error: raw.error,
+        status,
+        progress,
+        output_url: outputUrl,
+        error: raw?.error || raw?.message,
         job_id: extractJobId(raw) || jobId,
-        message: raw.message,
+        message: raw?.message,
       };
-      
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : String(e);
       errors.push(`${c.name}: ${errorMsg}`);
     }
   }
-  const errorSummary = `فشل فحص حالة المهمة ${jobId}:\n${errors.join('\n')}`;
+
+  const errorSummary = `تعذّر فحص الحالة للمهمة ${jobId}: ${errors.join(" | ")}`;
   logError(errorSummary);
-  
-  return { 
-    status: "failed" as const, 
-    progress: 0, 
-    job_id: jobId,
-    error: `تعذّر فحص الحالة: ${errors.join(" | ")}`
-  };
+  throw new Error(errorSummary);
 }
 // ===== MERGE WITH POLLING =====
 export async function mergeMediaWithFFmpeg(
