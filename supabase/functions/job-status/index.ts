@@ -244,11 +244,37 @@ serve(async (req) => {
 
       // Track consecutive failures
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
+      const mergeStartedAt = getMergeStartedAt(mergeStep, mergeOutput);
+      const mergeElapsedMs = mergeStartedAt
+        ? Date.now() - new Date(mergeStartedAt).getTime()
+        : 0;
+      const mergeTimedOut = mergeElapsedMs > MERGE_TIMEOUT_MS;
+      const statusEndpointsMissing = Boolean(mergeOutput?.status_endpoints_missing);
 
       try {
-        const providerStatus = await checkMergeStatus(providerJobId, {
-          statusEndpoint: providerStatusEndpoint,
-        });
+        let providerStatus;
+
+        if (statusEndpointsMissing) {
+          const storageOutput = await findProviderOutputInStorage(providerJobId);
+          providerStatus = storageOutput
+            ? {
+                status: "completed",
+                output_url: storageOutput,
+                job_id: providerJobId,
+                message: "Recovered via storage fallback",
+              }
+            : {
+                status: "processing",
+                progress: Math.max(Number(mergeOutput?.provider_progress || 80), 80),
+                job_id: providerJobId,
+                message: "Waiting for provider artifact in storage",
+              };
+        } else {
+          providerStatus = await checkMergeStatus(providerJobId, {
+            statusEndpoint: providerStatusEndpoint,
+          });
+        }
+
         logInfo(`حالة المزود [${providerJobId}]:`, providerStatus);
 
         // Success – reset failure counter
