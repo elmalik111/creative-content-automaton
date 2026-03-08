@@ -1,5 +1,8 @@
 import { useParams, Link } from 'react-router-dom';
+import { useState } from 'react';
 import { useJobDetails } from '@/hooks/useJobDetails';
+import { useQueryClient } from '@tanstack/react-query';
+import { supabase } from '@/integrations/supabase/client';
 import { DashboardLayout } from '@/layouts/DashboardLayout';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -7,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ProgressBar } from '@/components/dashboard/ProgressBar';
+import { toast } from 'sonner';
 import { 
   ArrowLeft, 
   Download, 
@@ -19,7 +23,10 @@ import {
   Mic,
   Image,
   Merge,
-  Send
+  Send,
+  RotateCcw,
+  StopCircle,
+  Ban
 } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 
@@ -57,6 +64,45 @@ const statusLabels: Record<string, string> = {
 export default function JobDetails() {
   const { id } = useParams<{ id: string }>();
   const { data: job, isLoading } = useJobDetails(id || '');
+  const queryClient = useQueryClient();
+  const [retrying, setRetrying] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+
+  const handleRetryMerge = async () => {
+    if (!id || retrying) return;
+    setRetrying(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('retry-merge', {
+        body: { job_id: id },
+      });
+      if (error) throw error;
+      toast.success('تم بدء إعادة الدمج بنجاح');
+      queryClient.invalidateQueries({ queryKey: ['job-details', id] });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`فشل إعادة الدمج: ${msg}`);
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  const handleCancelJob = async () => {
+    if (!id || cancelling) return;
+    setCancelling(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('cancel-job', {
+        body: { job_id: id },
+      });
+      if (error) throw error;
+      toast.success('تم إلغاء المهمة بنجاح');
+      queryClient.invalidateQueries({ queryKey: ['job-details', id] });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`فشل إلغاء المهمة: ${msg}`);
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -207,16 +253,67 @@ export default function JobDetails() {
       : undefined;
   const isMergeSlow = (mergeElapsedMinutes ?? 0) >= 8;
 
+  // Can retry merge if merge step failed or job failed with completed images
+  const canRetryMerge =
+    (mergeStep?.status === 'failed' || (job.status === 'failed' && imageStep?.status === 'completed')) &&
+    !retrying;
+
+  // Can cancel if job is processing or pending
+  const canCancel =
+    (job.status === 'processing' || job.status === 'pending') && !cancelling;
+
+  const isCancelledByUser =
+    job.status === 'failed' &&
+    typeof job.error_message === 'string' &&
+    job.error_message.toLowerCase().includes('cancel');
+
   return (
     <DashboardLayout>
       <div className="max-w-4xl mx-auto space-y-6">
         {/* Header */}
-        <Link to="/">
-          <Button variant="ghost">
-            <ArrowLeft className="h-4 w-4 ml-2" />
-            رجوع للوحة التحكم
-          </Button>
-        </Link>
+        <div className="flex items-center justify-between">
+          <Link to="/">
+            <Button variant="ghost">
+              <ArrowLeft className="h-4 w-4 ml-2" />
+              رجوع للوحة التحكم
+            </Button>
+          </Link>
+
+          {/* Action Buttons */}
+          <div className="flex items-center gap-2">
+            {canRetryMerge && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRetryMerge}
+                disabled={retrying}
+              >
+                {retrying ? (
+                  <Loader2 className="h-4 w-4 ml-2 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4 ml-2" />
+                )}
+                {retrying ? 'جارٍ إعادة الدمج...' : 'إعادة الدمج'}
+              </Button>
+            )}
+
+            {canCancel && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleCancelJob}
+                disabled={cancelling}
+              >
+                {cancelling ? (
+                  <Loader2 className="h-4 w-4 ml-2 animate-spin" />
+                ) : (
+                  <Ban className="h-4 w-4 ml-2" />
+                )}
+                {cancelling ? 'جارٍ الإلغاء...' : 'إلغاء المهمة'}
+              </Button>
+            )}
+          </div>
+        </div>
 
         {/* Job Overview */}
         <Card>
@@ -259,6 +356,18 @@ export default function JobDetails() {
               </div>
               <ProgressBar progress={job.progress} />
             </div>
+
+            {/* Cancelled by user notice */}
+            {isCancelledByUser && (
+              <Alert>
+                <StopCircle className="h-4 w-4" />
+                <AlertTitle>تم الإلغاء</AlertTitle>
+                <AlertDescription>
+                  تم إلغاء هذه المهمة بواسطة المستخدم.
+                  {canRetryMerge && ' يمكنك إعادة الدمج بنفس الصور والصوت.'}
+                </AlertDescription>
+              </Alert>
+            )}
 
             {hasImageCounter && (
               <div className="p-3 rounded-lg border bg-muted/30 space-y-3">
@@ -313,13 +422,13 @@ export default function JobDetails() {
               <Alert>
                 <AlertTitle>تنبيه أداء: الدمج بطيء</AlertTitle>
                 <AlertDescription>
-                  خطوة الدمج تعمل منذ {mergeElapsedMinutes} دقيقة. إذا استمر البطء، ألغِ المهمة وأعد تشغيلها لتجربة payload variant مختلف.
+                  خطوة الدمج تعمل منذ {mergeElapsedMinutes} دقيقة. يمكنك إلغاء المهمة وإعادة تشغيلها.
                 </AlertDescription>
               </Alert>
             )}
 
             {/* Error Message */}
-            {job.error_message && (
+            {job.error_message && !isCancelledByUser && (
               <div className="p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-sm">
                 <p className="font-medium mb-1">خطأ</p>
                 <p>{job.error_message}</p>
@@ -359,6 +468,9 @@ export default function JobDetails() {
                   {job.steps.map((step, index) => {
                     const StepIcon = stepIcons[step.step_name] || FileVideo;
                     const label = stepLabels[step.step_name] || step.step_name;
+                    const isFailedMerge =
+                      (step.step_name === 'merge' || step.step_name === 'media_merge') &&
+                      step.status === 'failed';
                     
                     return (
                       <div key={step.id} className="relative flex gap-4">
@@ -374,7 +486,21 @@ export default function JobDetails() {
                               <StepIcon className="h-4 w-4 text-muted-foreground" />
                               <span className="font-medium">{label}</span>
                             </div>
-                            {getStatusBadge(step.status)}
+                            <div className="flex items-center gap-2">
+                              {isFailedMerge && canRetryMerge && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 text-xs"
+                                  onClick={handleRetryMerge}
+                                  disabled={retrying}
+                                >
+                                  <RotateCcw className="h-3 w-3 ml-1" />
+                                  إعادة
+                                </Button>
+                              )}
+                              {getStatusBadge(step.status)}
+                            </div>
                           </div>
                           
                           <div className="text-xs text-muted-foreground space-y-1">
