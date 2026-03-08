@@ -279,36 +279,65 @@ serve(async (req) => {
 
         // Success – reset failure counter
         if (providerStatus.status === "processing") {
-          const mapped = Math.min(
-            89,
-            Math.max(
-              job.progress || 75,
-              75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
-            )
-          );
+          if (statusEndpointsMissing && mergeTimedOut) {
+            const timeoutMsg =
+              `انتهت مهلة الدمج (${Math.round(MERGE_TIMEOUT_MS / 60000)} دقائق) بدون status endpoint وبدون ملف ناتج.` +
+              `\nمعرف مهمة المزود: ${providerJobId}`;
 
-          await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
-
-          if (mergeStep?.id) {
             await supabase
               .from("job_steps")
               .update({
+                status: "failed",
+                error_message: timeoutMsg,
+                completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
-                  provider: "ffmpeg-space",
-                  provider_job_id: providerJobId,
                   provider_status_endpoint: providerStatusEndpoint,
-                  provider_progress: providerStatus.progress,
-                  provider_status: providerStatus.status,
-                  stage: "processing",
-                  consecutive_failures: 0, // Reset on successful check
-                  last_check: new Date().toISOString(),
+                  status_endpoints_missing: true,
+                  timeout_reached: true,
+                  final_error: timeoutMsg,
                 },
               })
-              .eq("id", mergeStep.id);
-          }
+              .eq("id", mergeStep?.id);
 
-          logInfo(`✓ تحديث التقدم: ${mapped}%`);
+            await supabase
+              .from("jobs")
+              .update({ status: "failed", error_message: timeoutMsg })
+              .eq("id", jobId);
+          } else {
+            const mapped = Math.min(
+              89,
+              Math.max(
+                job.progress || 75,
+                75 + Math.round(((providerStatus.progress ?? 0) / 100) * 14)
+              )
+            );
+
+            await supabase.from("jobs").update({ progress: mapped }).eq("id", jobId);
+
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider: "ffmpeg-space",
+                    provider_job_id: providerJobId,
+                    provider_status_endpoint: providerStatusEndpoint,
+                    provider_progress: providerStatus.progress,
+                    provider_status: providerStatus.status,
+                    stage: "processing",
+                    status_endpoints_missing: statusEndpointsMissing,
+                    consecutive_failures: 0,
+                    waiting_for_artifact: statusEndpointsMissing,
+                    last_check: new Date().toISOString(),
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
+
+            logInfo(`✓ تحديث التقدم: ${mapped}%`);
+          }
         }
 
         if (providerStatus.status === "failed") {
