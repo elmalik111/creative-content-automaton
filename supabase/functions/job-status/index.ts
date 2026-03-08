@@ -399,34 +399,66 @@ serve(async (req) => {
           }
 
           const providerOutputUrl = providerStatus.output_url;
+          let finalUrl = providerOutputUrl;
+          let persistedToStorage = false;
+          let storageUploadError: string | null = null;
+
           logInfo(`تحميل الفيديو من: ${providerOutputUrl}`);
 
-          const videoResp = await fetch(providerOutputUrl);
-          if (!videoResp.ok) {
-            throw new Error(`Failed to download merged video (HTTP ${videoResp.status})`);
+          try {
+            const videoResp = await fetch(providerOutputUrl);
+            if (!videoResp.ok) {
+              throw new Error(`Failed to download merged video (HTTP ${videoResp.status})`);
+            }
+
+            const videoBuffer = await videoResp.arrayBuffer();
+            logInfo(`✓ تم تحميل الفيديو (${videoBuffer.byteLength} bytes)`);
+
+            const finalVideoName = `${jobId}/final_video.mp4`;
+            const { error: uploadErr } = await supabase.storage
+              .from("media-output")
+              .upload(finalVideoName, videoBuffer, {
+                contentType: "video/mp4",
+                upsert: true,
+              });
+
+            if (uploadErr) {
+              storageUploadError = uploadErr.message;
+
+              if (isStorageSizeError(uploadErr)) {
+                logWarning("حجم الفيديو النهائي أكبر من حد الرفع في Storage — سيتم اعتماد رابط المزود مباشرة", {
+                  jobId,
+                  providerJobId,
+                  providerOutputUrl,
+                });
+              } else {
+                logError(`فشل رفع الفيديو النهائي`, uploadErr);
+                throw new Error(`Final video upload failed: ${uploadErr.message}`);
+              }
+            } else {
+              const { data: publicUrlData } = supabase.storage
+                .from("media-output")
+                .getPublicUrl(finalVideoName);
+
+              finalUrl = publicUrlData.publicUrl;
+              persistedToStorage = true;
+              logInfo(`✓ الفيديو النهائي متاح على: ${finalUrl}`);
+            }
+          } catch (persistErr) {
+            if (isStorageSizeError(persistErr)) {
+              storageUploadError = persistErr instanceof Error ? persistErr.message : String(persistErr);
+              logWarning("تعذر حفظ الفيديو في Storage بسبب الحجم — سيتم اعتماد رابط المزود", {
+                jobId,
+                providerJobId,
+              });
+            } else {
+              throw persistErr;
+            }
           }
-          const videoBuffer = await videoResp.arrayBuffer();
-          logInfo(`✓ تم تحميل الفيديو (${videoBuffer.byteLength} bytes)`);
 
-          const finalVideoName = `${jobId}/final_video.mp4`;
-          const { error: uploadErr } = await supabase.storage
-            .from("media-output")
-            .upload(finalVideoName, videoBuffer, {
-              contentType: "video/mp4",
-              upsert: true,
-            });
-
-          if (uploadErr) {
-            logError(`فشل رفع الفيديو النهائي`, uploadErr);
-            throw new Error(`Final video upload failed: ${uploadErr.message}`);
+          if (!persistedToStorage) {
+            logInfo(`ℹ️ تم إكمال المهمة باستخدام رابط المزود مباشرة: ${finalUrl}`);
           }
-
-          const { data: publicUrlData } = supabase.storage
-            .from("media-output")
-            .getPublicUrl(finalVideoName);
-
-          const finalUrl = publicUrlData.publicUrl;
-          logInfo(`✓ الفيديو النهائي متاح على: ${finalUrl}`);
 
           if (mergeStep?.id) {
             await supabase
@@ -441,7 +473,10 @@ serve(async (req) => {
                   provider_status_endpoint: providerStatusEndpoint,
                   provider_output_url: providerOutputUrl,
                   output_url: finalUrl,
-                  stage: "persisted",
+                  persisted_to_storage: persistedToStorage,
+                  persistence_mode: persistedToStorage ? "media-output" : "provider",
+                  storage_upload_error: storageUploadError,
+                  stage: persistedToStorage ? "persisted" : "provider_completed",
                   consecutive_failures: 0,
                   completed_at: new Date().toISOString(),
                 },
