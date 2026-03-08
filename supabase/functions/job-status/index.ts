@@ -187,7 +187,7 @@ serve(async (req) => {
       }
     }
 
-    if (job.status === "processing" && providerJobId && !job.output_url) {
+    if ((job.status === "processing" || autoStoppedByWatcher) && providerJobId && !job.output_url) {
       logInfo(`مراقبة عملية الدمج للمهمة ${jobId} (معرف المزود: ${providerJobId})`);
 
       // Track consecutive failures
