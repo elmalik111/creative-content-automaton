@@ -533,8 +533,14 @@ async function processMediaMerge(
           duration_seconds: Math.round(mergeDuration / 1000),
           provider_output_url: providerOutputUrl,
           output_url: finalOutputUrl,
+          payload_variant: typeof (result.diagnostics as any)?.payload_variant === "string"
+            ? (result.diagnostics as any).payload_variant
+            : undefined,
           requested_image_count: Number((result.diagnostics as any)?.requested_image_count ?? request.images?.length ?? 0),
           provider_reported_image_count: Number((result.diagnostics as any)?.provider_reported_image_count ?? NaN),
+          provider_status_endpoint: typeof (result.diagnostics as any)?.provider_status_endpoint === "string"
+            ? (result.diagnostics as any).provider_status_endpoint
+            : undefined,
           diagnostics: result.diagnostics ?? null,
         },
       });

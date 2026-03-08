@@ -121,8 +121,14 @@ serve(async (req) => {
     const publishStep = (steps || []).find((s: any) => s.step_name === "publishing");
 
     const mergeOutput = (mergeStep?.output_data || {}) as any;
+    const mergeDiagnostics = (mergeOutput?.diagnostics || {}) as any;
     const providerJobId: string | undefined =
       mergeOutput?.provider_job_id || mergeOutput?.providerJobId || mergeOutput?.job_id || mergeOutput?.jobId;
+    const providerStatusEndpoint: string | undefined =
+      mergeOutput?.provider_status_endpoint ||
+      mergeOutput?.status_url ||
+      mergeDiagnostics?.provider_status_endpoint ||
+      mergeDiagnostics?.status_url;
 
     const autoStoppedByWatcher =
       job.status === "failed" &&
@@ -194,7 +200,9 @@ serve(async (req) => {
       const currentFailures: number = mergeOutput?.consecutive_failures || 0;
 
       try {
-        const providerStatus = await checkMergeStatus(providerJobId);
+        const providerStatus = await checkMergeStatus(providerJobId, {
+          statusEndpoint: providerStatusEndpoint,
+        });
         logInfo(`حالة المزود [${providerJobId}]:`, providerStatus);
 
         // Success – reset failure counter
@@ -217,6 +225,7 @@ serve(async (req) => {
                   ...(mergeOutput || {}),
                   provider: "ffmpeg-space",
                   provider_job_id: providerJobId,
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_progress: providerStatus.progress,
                   provider_status: providerStatus.status,
                   stage: "processing",
@@ -243,6 +252,7 @@ serve(async (req) => {
                 completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_error: msg,
                   failed_at: new Date().toISOString(),
                 }
@@ -303,6 +313,7 @@ serve(async (req) => {
                   ...(mergeOutput || {}),
                   provider: "ffmpeg-space",
                   provider_job_id: providerJobId,
+                  provider_status_endpoint: providerStatusEndpoint,
                   provider_output_url: providerOutputUrl,
                   output_url: finalUrl,
                   stage: "persisted",
@@ -421,7 +432,14 @@ serve(async (req) => {
 
         // Increment failure counter
         const newFailures = currentFailures + 1;
-        logWarning(`فشل مراقبة الدمج ${newFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`, errorMsg);
+        const notFoundCount = (errorMsg.match(/HTTP 404/g) || []).length;
+        const allStatusEndpointsMissing = notFoundCount >= 6;
+        const effectiveFailures = allStatusEndpointsMissing ? MAX_CONSECUTIVE_FAILURES : newFailures;
+
+        logWarning(
+          `فشل مراقبة الدمج ${effectiveFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`,
+          errorMsg
+        );
 
         // Check if it's a server health issue
         let serverHealthInfo = "";
@@ -443,7 +461,9 @@ serve(async (req) => {
             .update({
               output_data: {
                 ...(mergeOutput || {}),
-                consecutive_failures: newFailures,
+                provider_status_endpoint: providerStatusEndpoint,
+                consecutive_failures: effectiveFailures,
+                status_endpoints_missing: allStatusEndpointsMissing,
                 last_error: errorMsg,
                 last_error_time: new Date().toISOString(),
                 server_health_checked: !!serverHealthInfo,
@@ -453,12 +473,16 @@ serve(async (req) => {
         }
 
         // If too many consecutive failures, fail the job with detailed error
-        if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg = 
-            `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
-            `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
-            `معرف مهمة المزود: ${providerJobId}\n` +
-            `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
+        if (effectiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          const failMsg = allStatusEndpointsMissing
+            ? `تعذّر مراقبة مهمة الدمج لأن جميع مسارات الحالة أعادت 404.\n` +
+              `معرف مهمة المزود: ${providerJobId}\n` +
+              `نقطة الحالة الحالية: ${providerStatusEndpoint || 'غير متاحة'}\n` +
+              `الإجراء المقترح: أعد المحاولة مع مزود يدعم status endpoint أو تأكد من endpoint الصحيح.`
+            : `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
+              `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
+              `معرف مهمة المزود: ${providerJobId}\n` +
+              `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
 
@@ -471,7 +495,9 @@ serve(async (req) => {
                 completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
-                  consecutive_failures: newFailures,
+                  provider_status_endpoint: providerStatusEndpoint,
+                  consecutive_failures: effectiveFailures,
+                  status_endpoints_missing: allStatusEndpointsMissing,
                   max_failures_reached: true,
                   final_error: failMsg,
                 },

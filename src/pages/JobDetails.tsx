@@ -176,6 +176,37 @@ export default function JobDetails() {
     providerImageCount !== undefined &&
     sentImageCount !== providerImageCount;
 
+  const payloadVariantRaw = mergeOutput.payload_variant ?? mergeDiagnostics.payload_variant;
+  const payloadVariant =
+    typeof payloadVariantRaw === 'string' && payloadVariantRaw.trim()
+      ? payloadVariantRaw.trim()
+      : undefined;
+
+  const payloadVariantLabels: Record<string, string> = {
+    image_urls_only: 'image_urls_only',
+    images_only: 'images_only',
+    imageUrls_only: 'imageUrls_only',
+    single_or_video: 'single_or_video',
+  };
+
+  const providerStatusEndpointRaw =
+    mergeOutput.provider_status_endpoint ??
+    mergeDiagnostics.provider_status_endpoint ??
+    mergeOutput.status_url ??
+    mergeDiagnostics.status_url;
+
+  const providerStatusEndpoint =
+    typeof providerStatusEndpointRaw === 'string' && providerStatusEndpointRaw.trim()
+      ? providerStatusEndpointRaw.trim()
+      : undefined;
+
+  const mergeStartedAtMs = mergeStep?.started_at ? new Date(mergeStep.started_at).getTime() : undefined;
+  const mergeElapsedMinutes =
+    mergeStep?.status === 'processing' && mergeStartedAtMs
+      ? Math.max(0, Math.floor((Date.now() - mergeStartedAtMs) / 60000))
+      : undefined;
+  const isMergeSlow = (mergeElapsedMinutes ?? 0) >= 8;
+
   return (
     <DashboardLayout>
       <div className="max-w-4xl mx-auto space-y-6">
@@ -258,6 +289,33 @@ export default function JobDetails() {
                   </Alert>
                 )}
               </div>
+            )}
+
+            <div className="p-3 rounded-lg border bg-muted/30 space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-sm font-medium">سجل Payload الدمج</p>
+                <Badge variant="outline">{payloadVariant ? 'متوفر' : 'غير متوفر'}</Badge>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
+                <div className="rounded-md bg-background/70 border px-3 py-2">
+                  <p className="text-xs text-muted-foreground mb-1">Payload Variant</p>
+                  <p className="font-semibold">{payloadVariant ? (payloadVariantLabels[payloadVariant] ?? payloadVariant) : 'غير متاح'}</p>
+                </div>
+                <div className="rounded-md bg-background/70 border px-3 py-2">
+                  <p className="text-xs text-muted-foreground mb-1">Provider Status Endpoint</p>
+                  <p className="font-mono text-xs break-all">{providerStatusEndpoint ?? 'غير متاح'}</p>
+                </div>
+              </div>
+            </div>
+
+            {isMergeSlow && (
+              <Alert>
+                <AlertTitle>تنبيه أداء: الدمج بطيء</AlertTitle>
+                <AlertDescription>
+                  خطوة الدمج تعمل منذ {mergeElapsedMinutes} دقيقة. إذا استمر البطء، ألغِ المهمة وأعد تشغيلها لتجربة payload variant مختلف.
+                </AlertDescription>
+              </Alert>
             )}
 
             {/* Error Message */}
