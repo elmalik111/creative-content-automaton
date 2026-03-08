@@ -432,7 +432,14 @@ serve(async (req) => {
 
         // Increment failure counter
         const newFailures = currentFailures + 1;
-        logWarning(`فشل مراقبة الدمج ${newFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`, errorMsg);
+        const notFoundCount = (errorMsg.match(/HTTP 404/g) || []).length;
+        const allStatusEndpointsMissing = notFoundCount >= 6;
+        const effectiveFailures = allStatusEndpointsMissing ? MAX_CONSECUTIVE_FAILURES : newFailures;
+
+        logWarning(
+          `فشل مراقبة الدمج ${effectiveFailures}/${MAX_CONSECUTIVE_FAILURES} للمهمة ${jobId}`,
+          errorMsg
+        );
 
         // Check if it's a server health issue
         let serverHealthInfo = "";
@@ -454,7 +461,9 @@ serve(async (req) => {
             .update({
               output_data: {
                 ...(mergeOutput || {}),
-                consecutive_failures: newFailures,
+                provider_status_endpoint: providerStatusEndpoint,
+                consecutive_failures: effectiveFailures,
+                status_endpoints_missing: allStatusEndpointsMissing,
                 last_error: errorMsg,
                 last_error_time: new Date().toISOString(),
                 server_health_checked: !!serverHealthInfo,
@@ -464,12 +473,16 @@ serve(async (req) => {
         }
 
         // If too many consecutive failures, fail the job with detailed error
-        if (newFailures >= MAX_CONSECUTIVE_FAILURES) {
-          const failMsg = 
-            `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
-            `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
-            `معرف مهمة المزود: ${providerJobId}\n` +
-            `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
+        if (effectiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          const failMsg = allStatusEndpointsMissing
+            ? `تعذّر مراقبة مهمة الدمج لأن جميع مسارات الحالة أعادت 404.\n` +
+              `معرف مهمة المزود: ${providerJobId}\n` +
+              `نقطة الحالة الحالية: ${providerStatusEndpoint || 'غير متاحة'}\n` +
+              `الإجراء المقترح: أعد المحاولة مع مزود يدعم status endpoint أو تأكد من endpoint الصحيح.`
+            : `سيرفر الدمج لا يستجيب بعد ${MAX_CONSECUTIVE_FAILURES} محاولة فاشلة متتالية.\n` +
+              `آخر خطأ: ${errorMsg}${serverHealthInfo}\n` +
+              `معرف مهمة المزود: ${providerJobId}\n` +
+              `الإجراء المقترح: تحقق من أن السيرفر يعمل على Hugging Face`;
 
           logError(`تجاوز الحد الأقصى للفشل - إيقاف المهمة ${jobId}`, failMsg);
 
@@ -482,7 +495,9 @@ serve(async (req) => {
                 completed_at: new Date().toISOString(),
                 output_data: {
                   ...(mergeOutput || {}),
-                  consecutive_failures: newFailures,
+                  provider_status_endpoint: providerStatusEndpoint,
+                  consecutive_failures: effectiveFailures,
+                  status_endpoints_missing: allStatusEndpointsMissing,
                   max_failures_reached: true,
                   final_error: failMsg,
                 },
