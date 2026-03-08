@@ -528,12 +528,22 @@ export default function JobDetails() {
                 <div className="absolute right-[22px] top-0 bottom-0 w-0.5 bg-border" />
                 
                 <div className="space-y-6">
-                  {job.steps.map((step, index) => {
+                  {job.steps.map((step) => {
                     const StepIcon = stepIcons[step.step_name] || FileVideo;
                     const label = stepLabels[step.step_name] || step.step_name;
                     const isFailedMerge =
                       (step.step_name === 'merge' || step.step_name === 'media_merge') &&
                       step.status === 'failed';
+
+                    const sla = STEP_SLA[step.step_name];
+                    const completedDuration =
+                      step.started_at && step.completed_at
+                        ? Math.floor(
+                            (new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 1000
+                          )
+                        : null;
+                    const isCompletedOverSLA =
+                      completedDuration !== null && sla !== undefined && completedDuration > sla;
                     
                     return (
                       <div key={step.id} className="relative flex gap-4">
@@ -548,6 +558,24 @@ export default function JobDetails() {
                             <div className="flex items-center gap-2">
                               <StepIcon className="h-4 w-4 text-muted-foreground" />
                               <span className="font-medium">{label}</span>
+                              {/* Live timer for active steps */}
+                              <StepTimer
+                                startedAt={step.started_at}
+                                stepName={step.step_name}
+                                status={step.status}
+                              />
+                              {/* Completed duration badge */}
+                              {completedDuration !== null && (
+                                <span className={`inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full border ${
+                                  isCompletedOverSLA
+                                    ? 'text-amber-600 border-amber-500/30 bg-amber-500/10'
+                                    : 'text-muted-foreground border-border bg-muted/40'
+                                }`}>
+                                  <Timer className="h-3 w-3" />
+                                  {formatElapsed(completedDuration)}
+                                  {isCompletedOverSLA && <AlertTriangle className="h-3 w-3 text-amber-500" />}
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-2">
                               {isFailedMerge && canRetryMerge && (
@@ -574,6 +602,14 @@ export default function JobDetails() {
                               <p>اكتمل: {format(new Date(step.completed_at), 'PPp')}</p>
                             )}
                           </div>
+
+                          {/* SLA warning for completed step that took too long */}
+                          {isCompletedOverSLA && sla && (
+                            <div className="mt-1.5 flex items-center gap-1.5 text-xs text-amber-600 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                              <AlertTriangle className="h-3 w-3 shrink-0" />
+                              استغرقت هذه الخطوة {formatElapsed(completedDuration!)} وهو أبطأ من المتوقع ({formatElapsed(sla)})
+                            </div>
+                          )}
                           
                           {step.error_message && (
                             <div className="mt-2 p-2 rounded bg-destructive/10 text-destructive text-xs">
