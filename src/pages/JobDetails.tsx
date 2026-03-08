@@ -1,5 +1,5 @@
 import { useParams, Link } from 'react-router-dom';
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useJobDetails } from '@/hooks/useJobDetails';
 import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
@@ -26,9 +26,72 @@ import {
   Send,
   RotateCcw,
   StopCircle,
-  Ban
+  Ban,
+  AlertTriangle,
+  Timer
 } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
+
+// SLA limits per step in seconds
+const STEP_SLA: Record<string, number> = {
+  validate_inputs: 30,
+  script_generation: 60,
+  voice_generation: 120,
+  image_generation: 300,
+  media_merge: 600,
+  merge: 600,
+  publishing: 120,
+  upload: 120,
+  finalize: 60,
+};
+
+function useElapsedSeconds(startedAt: string | null, isActive: boolean) {
+  const [elapsed, setElapsed] = useState(0);
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!isActive || !startedAt) {
+      setElapsed(0);
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      return;
+    }
+    const start = new Date(startedAt).getTime();
+    const tick = () => setElapsed(Math.floor((Date.now() - start) / 1000));
+    tick();
+    intervalRef.current = setInterval(tick, 1000);
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+  }, [startedAt, isActive]);
+
+  return elapsed;
+}
+
+function formatElapsed(secs: number) {
+  if (secs < 60) return `${secs}ث`;
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s > 0 ? `${m}د ${s}ث` : `${m}د`;
+}
+
+function StepTimer({ startedAt, stepName, status }: { startedAt: string | null; stepName: string; status: string }) {
+  const isActive = status === 'processing';
+  const elapsed = useElapsedSeconds(startedAt, isActive);
+  const sla = STEP_SLA[stepName];
+  const isOverSLA = sla !== undefined && elapsed > sla;
+
+  if (!isActive || !startedAt) return null;
+
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-full border ${
+      isOverSLA
+        ? 'text-destructive border-destructive/30 bg-destructive/10 animate-pulse'
+        : 'text-blue-600 border-blue-500/20 bg-blue-500/10'
+    }`}>
+      {isOverSLA ? <AlertTriangle className="h-3 w-3" /> : <Timer className="h-3 w-3" />}
+      {formatElapsed(elapsed)}
+      {isOverSLA && sla && <span className="opacity-70">/ {formatElapsed(sla)}</span>}
+    </span>
+  );
+}
 
 const stepIcons: Record<string, React.ElementType> = {
   'validate_inputs': FileVideo,
