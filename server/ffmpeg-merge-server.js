@@ -290,20 +290,56 @@ async function processFFmpegJob(jobId, imagesInput, audioUrl, videosInput) {
         job.progress = 5 + Math.round((i + 1) / videoUrls.length * 8);
       }
       if (localMediaPaths.length === 0) throw new Error('فشل تحميل جميع الفيديوهات');
-    } else {
       // ===== وضع الصورة: تحميل كل الصور =====
-      job.logs.push(`تحميل ${imageUrls.length} صورة وملف الصوت...`);
+      const requestedImageCount = imageUrls.length;
+      job.logs.push(`تحميل ${requestedImageCount} صورة وملف الصوت...`);
+
+      const failedImages = [];
+
       for (let i = 0; i < imageUrls.length; i++) {
-        const localPath = await downloadFile(imageUrls[i], `${jobId}_${i}`, `image_${i}`);
-        if (fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
+        let localPath = null;
+        let lastErr = null;
+
+        // محاولات إضافية لكل صورة (لتقليل حالات "صورة واحدة فقط")
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            localPath = await downloadFile(imageUrls[i], `${jobId}_${i}`, `image_${i}`);
+            lastErr = null;
+            break;
+          } catch (e) {
+            lastErr = e;
+            logWarning(`⚠️ فشل تحميل الصورة ${i + 1}/${requestedImageCount} محاولة ${attempt}/3`, {
+              url: String(imageUrls[i]).slice(0, 140),
+              error: e?.message || String(e),
+            });
+            if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+          }
+        }
+
+        if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
           localMediaPaths.push(localPath);
-          logInfo(`✓ تم تحميل الصورة ${i + 1}/${imageUrls.length}`);
+          logInfo(`✓ تم تحميل الصورة ${i + 1}/${requestedImageCount}`);
         } else {
+          failedImages.push({ index: i, url: imageUrls[i], error: lastErr?.message || String(lastErr || 'unknown') });
           logError(`❌ فشل تحميل الصورة ${i + 1} - تخطي`);
         }
-        job.progress = 5 + Math.round((i + 1) / imageUrls.length * 8);
+
+        job.progress = 5 + Math.round((i + 1) / Math.max(1, requestedImageCount) * 8);
       }
+
+      if (failedImages.length) {
+        job.logs.push(`⚠️ فشل تحميل ${failedImages.length} صورة من أصل ${requestedImageCount}`);
+        logWarning(`فشل بعض الصور [${jobId}]`, { failed: failedImages.slice(0, 3) });
+      }
+
       if (localMediaPaths.length === 0) throw new Error('فشل تحميل جميع الصور');
+
+      // إصلاح نهائي: إذا تم طلب تعدد الصور، لا نكمل لتجنب إخراج فيديو بصورة واحدة فقط
+      if (requestedImageCount > 1 && localMediaPaths.length < 2) {
+        throw new Error(
+          `تم طلب ${requestedImageCount} صورة لكن تم تحميل ${localMediaPaths.length} فقط؛ تم إيقاف الدمج لتجنب إنتاج فيديو بصورة واحدة.`
+        );
+      }
     }
 
     localAudioPath = await downloadFile(audioUrl, jobId, 'audio');
