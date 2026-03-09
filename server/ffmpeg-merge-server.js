@@ -516,6 +516,16 @@ async function processFFmpegJob(jobId, imagesInput, audioUrl, videosInput) {
         if (fs.existsSync(cf)) { try { fs.unlinkSync(cf); } catch {} }
       }
 
+      // Clean up downloaded inputs for this run (يقلل امتلاء القرص → يقلل فشل تحميل الصور)
+      for (const p of Array.isArray(localMediaPaths) ? localMediaPaths : []) {
+        try {
+          if (p && fs.existsSync(p)) fs.unlinkSync(p);
+        } catch {}
+      }
+      try {
+        if (localAudioPath && fs.existsSync(localAudioPath)) fs.unlinkSync(localAudioPath);
+      } catch {}
+
       if (code === 0) {
         // Success
         try {
