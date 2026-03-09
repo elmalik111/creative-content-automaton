@@ -677,6 +677,7 @@ export async function checkMergeStatus(
   candidates.push(
     { method: "GET", url: `${HF_SPACE_URL}/status/${jobId}`, name: "GET /status/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/job-status/${jobId}`, name: "GET /job-status/:id" },
+    { method: "GET", url: `${HF_SPACE_URL}/merge/status/${jobId}`, name: "GET /merge/status/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/merge-status/${jobId}`, name: "GET /merge-status/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/result/${jobId}`, name: "GET /result/:id" },
     { method: "GET", url: `${HF_SPACE_URL}/results/${jobId}`, name: "GET /results/:id" },
