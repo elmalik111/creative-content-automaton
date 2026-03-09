@@ -9,6 +9,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===== GLOBAL ERROR HANDLERS (يمنع إعادة التشغيل) =====
+process.on('uncaughtException', (err) => {
+  console.error(`[${new Date().toISOString()}] [CRITICAL] Uncaught Exception - السيرفر لن يتوقف:`, err?.message || err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error(`[${new Date().toISOString()}] [CRITICAL] Unhandled Promise Rejection:`, reason?.message || String(reason));
+});
+
 // ===== LOGGING =====
 function logInfo(message, data) {
   console.log(`[${new Date().toISOString()}] [INFO] ${message}`, data ? JSON.stringify(data, null, 2) : '');
