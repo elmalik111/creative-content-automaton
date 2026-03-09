@@ -59,6 +59,39 @@ function sanitizeUrl(url) {
   return url.trim();
 }
 
+// يقبل array أو string أو JSON-string أو comma-separated ويحوّله لقائمة
+function normalizeToArray(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return [];
+
+  const v = value.trim();
+  if (!v) return [];
+
+  // JSON array string
+  try {
+    const parsed = JSON.parse(v);
+    if (Array.isArray(parsed)) return parsed;
+  } catch {}
+
+  // comma-separated list
+  if (v.includes(',')) return v.split(',').map(s => s.trim()).filter(Boolean);
+
+  return [v];
+}
+
+function uniqCompact(list) {
+  const out = [];
+  const seen = new Set();
+  for (const item of Array.isArray(list) ? list : []) {
+    const s = sanitizeUrl(typeof item === 'string' ? item : String(item ?? ''));
+    if (!s) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function validateUrls(imageUrl, audioUrl) {
   const errors = [];
   
