@@ -440,17 +440,20 @@ async function processFFmpegJob(jobId, imagesInput, audioUrl, videosInput) {
       logInfo(`Ken Burns: ${localMediaPaths.length} صورة - ${durationPerImage.toFixed(2)}s/صورة - ${framesPerImg} frame/صورة`);
 
       // أنماط Ken Burns: كل صورة لها حركة مختلفة
+      // استخدام scale=3000:-1 بدل 8000:-1 لتقليل استهلاك الذاكرة بشكل كبير
+      // 8000px كان يستهلك ~340MB لكل صورة مما يسبب فشل صامت للصور اللاحقة
+      const scaleW = 3000;
       const kenBurnsPatterns = [
         // zoom in من المركز
-        `scale=8000:-1,zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
+        `scale=${scaleW}:-1,zoompan=z='min(zoom+0.0015,1.5)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
         // zoom out مع pan يسار
-        `scale=8000:-1,zoompan=z='if(lte(zoom,1.0),1.5,max(1.001,zoom-0.0015))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
+        `scale=${scaleW}:-1,zoompan=z='if(lte(zoom,1.0),1.5,max(1.001,zoom-0.0015))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
         // pan من يسار لليمين مع zoom خفيف
-        `scale=8000:-1,zoompan=z='min(zoom+0.001,1.3)':x='if(lte(on,1),0,x+1.5)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
+        `scale=${scaleW}:-1,zoompan=z='min(zoom+0.001,1.3)':x='if(lte(on,1),0,x+2)':y='ih/2-(ih/zoom/2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
         // pan من فوق لتحت
-        `scale=8000:-1,zoompan=z='1.3':x='iw/2-(iw/zoom/2)':y='if(lte(on,1),0,y+1.5)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
+        `scale=${scaleW}:-1,zoompan=z='1.3':x='iw/2-(iw/zoom/2)':y='if(lte(on,1),0,y+2)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
         // zoom in مع pan قطري
-        `scale=8000:-1,zoompan=z='min(zoom+0.002,1.6)':x='if(lte(on,1),0,x+1)':y='if(lte(on,1),0,y+1)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
+        `scale=${scaleW}:-1,zoompan=z='min(zoom+0.002,1.6)':x='if(lte(on,1),0,x+1.5)':y='if(lte(on,1),0,y+1.5)':d=${framesPerImg}:s=1080x1920:fps=${fps}`,
       ];
 
       // بناء complex filter لكل الصور
