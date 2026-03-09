@@ -9,6 +9,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ===== GLOBAL ERROR HANDLERS (يمنع إعادة التشغيل) =====
+process.on('uncaughtException', (err) => {
+  console.error(`[${new Date().toISOString()}] [CRITICAL] Uncaught Exception - السيرفر لن يتوقف:`, err?.message || err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error(`[${new Date().toISOString()}] [CRITICAL] Unhandled Promise Rejection:`, reason?.message || String(reason));
+});
+
 // ===== LOGGING =====
 function logInfo(message, data) {
   console.log(`[${new Date().toISOString()}] [INFO] ${message}`, data ? JSON.stringify(data, null, 2) : '');
@@ -168,23 +177,25 @@ async function downloadFile(url, jobId, fileType) {
  * Clean up temporary files
  */
 function cleanupTempFiles(jobId) {
-  const tempFiles = [
-    path.join(TEMP_DIR, `${jobId}_image.jpg`),
-    path.join(TEMP_DIR, `${jobId}_image.png`),
-    path.join(TEMP_DIR, `${jobId}_audio.mp3`),
-    path.join(TEMP_DIR, `${jobId}_audio.wav`),
-  ];
-  
-  tempFiles.forEach(file => {
-    if (fs.existsSync(file)) {
-      try {
-        fs.unlinkSync(file);
-        logInfo(`تم حذف الملف المؤقت: ${file}`);
-      } catch (err) {
-        logWarning(`فشل حذف الملف المؤقت: ${file}`, err);
+  // احذف جميع الملفات المؤقتة التي تبدأ بـ jobId (الأسماء القديمة والجديدة)
+  try {
+    const files = fs.readdirSync(TEMP_DIR);
+    let deleted = 0;
+    files.forEach(file => {
+      // تطابق: job_xxx_* أو job_xxx_0_image_0.jpg أو job_xxx_audio.mp3 إلخ
+      if (file.startsWith(jobId)) {
+        try {
+          fs.unlinkSync(path.join(TEMP_DIR, file));
+          deleted++;
+        } catch (err) {
+          logWarning(`فشل حذف الملف المؤقت: ${file}`, err?.message);
+        }
       }
-    }
-  });
+    });
+    if (deleted > 0) logInfo(`cleanupTempFiles [${jobId}]: حذف ${deleted} ملف`);
+  } catch (err) {
+    logWarning(`cleanupTempFiles: فشل قراءة TEMP_DIR`, err?.message);
+  }
 }
 
 async function uploadToSupabase(jobId, filePath) {
