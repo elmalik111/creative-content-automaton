@@ -625,27 +625,57 @@ const handleStartJob = async (req, res) => {
     body: req.body
   });
 
-  const { imageUrl, audioUrl, images, videos, audio } = req.body;
-  
-  // جمع كل الفيديوهات المرسلة
-  const allVideos = [];
-  if (Array.isArray(videos) && videos.length > 0) {
-    videos.forEach(u => { if (u) allVideos.push(sanitizeUrl(u)); });
-  }
-  
-  // جمع كل الصور المرسلة (images[] + imageUrl) - fallback إذا لا يوجد فيديو
-  const allImages = [];
+  const {
+    // images
+    images,
+    imageUrl,
+    image_url,
+    imageUrls,
+    image_urls,
+    primary_image,
+
+    // videos
+    videos,
+    video_urls,
+
+    // audio
+    audio,
+    audioUrl,
+    audio_url,
+    audio_path,
+  } = req.body || {};
+
+  // جمع كل الفيديوهات المرسلة (دعم videos + video_urls)
+  const allVideos = uniqCompact([
+    ...normalizeToArray(videos),
+    ...normalizeToArray(video_urls),
+  ]);
+
+  // جمع كل الصور المرسلة من كل الصيغ (فقط إذا لا يوجد فيديو)
+  let allImages = [];
   if (allVideos.length === 0) {
-    if (Array.isArray(images) && images.length > 0) {
-      images.forEach(u => { if (u) allImages.push(sanitizeUrl(u)); });
-    } else if (imageUrl) {
-      allImages.push(sanitizeUrl(imageUrl));
-    }
+    allImages = uniqCompact([
+      ...normalizeToArray(images),
+      ...normalizeToArray(image_urls),
+      ...normalizeToArray(imageUrls),
+      ...normalizeToArray(imageUrl),
+      ...normalizeToArray(image_url),
+      ...normalizeToArray(primary_image),
+    ]);
   }
-  
-  const normalizedAudioUrl = sanitizeUrl(audioUrl || audio);
+
+  const normalizedAudioUrl = sanitizeUrl(audioUrl || audio_url || audio_path || audio);
   const isVideoMode = allVideos.length > 0;
-  
+
+  logInfo(`تطبيع المدخلات [${requestId}]`, {
+    parsed: {
+      isVideoMode,
+      videos: allVideos.length,
+      images: allImages.length,
+      hasAudio: !!normalizedAudioUrl,
+    },
+  });
+
   // تحقق من وجود محتوى مرئي وصوت
   if (allVideos.length === 0 && allImages.length === 0) {
     logError('لا توجد صور أو فيديوهات في الطلب', { received: req.body });
