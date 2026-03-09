@@ -617,14 +617,60 @@ serve(async (req) => {
           }
 
           if (storageOutput) {
-            logInfo(`✅ تم العثور على ملف المزود مباشرةً بدون status endpoint`, {
+            const recoveredAt = new Date().toISOString();
+
+            if (mergeStep?.id) {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "completed",
+                  completed_at: recoveredAt,
+                  output_data: {
+                    ...(mergeOutput || {}),
+                    provider_status_endpoint: providerStatusEndpoint,
+                    consecutive_failures: 0,
+                    status_endpoints_missing: true,
+                    recovered_provider_output_url: storageOutput,
+                    output_url: storageOutput,
+                    recovered_via_storage_fallback: true,
+                    stage: "provider_recovered_from_storage",
+                    completed_at: recoveredAt,
+                  },
+                })
+                .eq("id", mergeStep.id);
+            }
+
+            await supabase
+              .from("jobs")
+              .update({
+                status: "completed",
+                progress: 100,
+                output_url: storageOutput,
+                error_message: null,
+              })
+              .eq("id", jobId);
+
+            if (publishStep?.id && publishStep.status !== "completed") {
+              await supabase
+                .from("job_steps")
+                .update({
+                  status: "completed",
+                  started_at: publishStep.started_at || recoveredAt,
+                  completed_at: recoveredAt,
+                  output_data: {
+                    video_url: storageOutput,
+                    recovered_via_storage_fallback: true,
+                  },
+                })
+                .eq("id", publishStep.id);
+            }
+
+            logInfo(`✅ تم العثور على ملف المزود مباشرةً وإكمال المهمة`, {
               jobId,
               providerJobId,
               storageOutput,
             });
-          }
-
-          if (mergeTimedOut && !storageOutput) {
+          } else if (mergeTimedOut) {
             const failMsg =
               `انتهت مهلة الدمج (${Math.round(MERGE_TIMEOUT_MS / 60000)} دقائق) بدون status endpoint وبدون ملف ناتج.` +
               `\nمعرف مهمة المزود: ${providerJobId}`;
