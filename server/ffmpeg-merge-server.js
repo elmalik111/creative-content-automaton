@@ -290,9 +290,13 @@ async function processFFmpegJob(jobId, imagesInput, audioUrl, videosInput) {
         job.progress = 5 + Math.round((i + 1) / videoUrls.length * 8);
       }
       if (localMediaPaths.length === 0) throw new Error('فشل تحميل جميع الفيديوهات');
+
+    } else {
       // ===== وضع الصورة: تحميل كل الصور =====
       const requestedImageCount = imageUrls.length;
       job.logs.push(`تحميل ${requestedImageCount} صورة وملف الصوت...`);
+
+      if (requestedImageCount === 0) throw new Error('لا توجد صور في الطلب');
 
       const failedImages = [];
 
